@@ -403,7 +403,7 @@ pre.mermaid, .mermaid { background: var(--bk-box); border: 1px solid var(--bk-li
 /* Footer of a page */
 .book-foot { margin: 40px 0 0; padding: 0 0 24px; font-size: 14px; color: var(--bk-muted); }
 .book-foot a, .book-foot a:link, .book-foot a:visited { color: var(--bk-heading); }
-/* As the footer of the site: "brokapi by RunInfra" on its own line in the middle, "Сообщить об ошибке" on the next one. */
+/* Как на сайте: подпись студии по центру, сообщение об ошибке отдельной строкой. */
 .book-foot-line { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 0; padding-top: 14px; border-top: 1px solid var(--bk-heading); }
 .book-foot .book-foot-line > span a { display: inline-block; padding: 7px 2px; font-weight: 400; }
 .book-foot .book-foot-line > span { line-height: 32px; }

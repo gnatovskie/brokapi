@@ -121,7 +121,7 @@ def main() -> int:
     pdoc.render.configure(
         docformat="restructuredtext",
         template_directory=HERE / "reference",
-        footer_text="brokapi by RunInfra",
+        footer_text="brokapi - проект студии GNATOVSKIE",
         search=True,
         show_source=False,
     )

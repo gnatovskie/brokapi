@@ -46,6 +46,12 @@ pip install brokapi
 
 Правила и проверка перед пушем: [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Команда и помощь
+
+brokapi - проект студии [GNATOVSKIE](https://gnatovskie.ru/). Библиотека бесплатная, код открыт.
+Подключение к вашей системе, доработка коннектора и разработка бота - отдельная платная работа команды:
+[помощь с внедрением brokapi](https://brokapi.ru/#help).
+
 ## Безопасность
 
 Уязвимость - не в открытые issues: [SECURITY.md](SECURITY.md).

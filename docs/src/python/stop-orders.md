@@ -109,7 +109,7 @@
 ```
 
 Вся программа, с журналом и запуском (`max_order_value` в `connect` - потолок одной заявки, [Потолки заявок](../guard.md)):
-[`signal_stop_bot.py`](https://github.com/runinfra/brokapi/blob/main/crates/python/examples/signal_stop_bot.py). Тест гоняет ее на имитации Финама:
+[`signal_stop_bot.py`](https://github.com/gnatovskie/brokapi/blob/main/crates/python/examples/signal_stop_bot.py). Тест гоняет ее на имитации Финама:
 рост цены, покупка, исполнение, стоп `150.85` для покупки по `151.61`, рестарт без второго стопа и второй покупки, рестарт после снятого руками стопа.
 
 ## Снять
@@ -136,7 +136,7 @@
 Для этих команд нужен клон репозитория: тесты и примеры в пакет `pip install brokapi` не входят. Версия пакета должна быть той же, что у клона (последний выпуск и его тег).
 
 ```bash
-git clone https://github.com/runinfra/brokapi && cd brokapi
+git clone https://github.com/gnatovskie/brokapi && cd brokapi
 pip install brokapi pytest pytest-asyncio
 cd crates/python
 pytest tests/test_stops.py tests/test_examples.py tests/test_guides.py

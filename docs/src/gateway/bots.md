@@ -33,7 +33,7 @@
 cargo add brokapi-gateway --no-default-features
 ```
 
-Самая свежая версия, из репозитория: `cargo add --git https://github.com/runinfra/brokapi brokapi-gateway --no-default-features`.
+Самая свежая версия, из репозитория: `cargo add --git https://github.com/gnatovskie/brokapi brokapi-gateway --no-default-features`.
 
 `RemoteClient` умеет те же трейты ядра, что коннектор, поэтому код для прямого подключения почти не меняется: [Торговый бот на событиях, Rust](../rust/howto-trading-bot.md).
 Отличия, с причинами: [Чем гейтвей отличается от прямого подключения](differences.md).
@@ -170,6 +170,10 @@ cargo add brokapi-gateway --no-default-features
 go get github.com/runinfra/brokapi/go@v{{brokapi_version}}
 ```
 
+Репозиторий находится в [GNATOVSKIE](https://github.com/gnatovskie/brokapi). Имя Go-модуля выпущенной версии
+сохраняется: `github.com/runinfra/brokapi/go`. Старый адрес перенаправляется в новый репозиторий, импорты менять не нужно.
+
+
 Номер модуля тот же, что у выпуска (тег `go/v{{brokapi_version}}`), `@main` берет самое новое. Он работает с программой `brokapi` с версии 0.1.0-alpha.6: раньше файлы `.proto` не собирались `protoc`. Нужен Go 1.25
 или новее, его требует grpc-go.
 
@@ -216,7 +220,7 @@ defer conn.Close()
 
 Любой язык, в котором есть gRPC, подключается сам: контракт - файлы `.proto` в каталоге `crates/gateway/proto/` репозитория (они же лежат в пакете `brokapi-gateway` на crates.io), справочник
 по ним - [Gateway (gRPC)](../api-gateway.md). Берите файлы той версии, что у вашей программы `brokapi`: каталог `crates/gateway/proto` в теге `v<версия>` на
-`github.com/runinfra/brokapi`, например `v{{brokapi_version}}`. В `main` они могут быть новее выпуска. `protoc` и `buf` собирают эти файлы с версии 0.1.0-alpha.6, в более старых вызовы `Portfolio` и другие закрывают
+`github.com/gnatovskie/brokapi`, например `v{{brokapi_version}}`. В `main` они могут быть новее выпуска. `protoc` и `buf` собирают эти файлы с версии 0.1.0-alpha.6, в более старых вызовы `Portfolio` и другие закрывают
 одноименные типы и `protoc` отказывает.
 
 Модуль для Go выше сделан именно так, и его код - образец для другого языка: `go/brokapi.go` в репозитории, две сотни строк. Что нужно сделать:

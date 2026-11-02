@@ -95,7 +95,7 @@ brokapi stops <гейтвей>     # активные стоп-заявки сч
 тестов и примеров нет):
 
 ```bash
-git clone https://github.com/runinfra/brokapi && cd brokapi
+git clone https://github.com/gnatovskie/brokapi && cd brokapi
 pip install brokapi pytest pytest-asyncio
 cd crates/python && pytest tests/test_guides.py -k emergency
 ```

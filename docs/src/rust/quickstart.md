@@ -22,7 +22,7 @@ cargo add dotenvy
 Самая свежая версия из репозитория - вместо первой строки (подробности и проверка - на странице [Установка](../install.md)):
 
 ```bash
-cargo add --git https://github.com/runinfra/brokapi brokapi --features tbank
+cargo add --git https://github.com/gnatovskie/brokapi brokapi --features tbank
 ```
 
 Должно получиться в `Cargo.toml`:
@@ -34,7 +34,7 @@ tokio   = { version = "1", features = ["full"] }
 dotenvy = "0.15"
 ```
 
-Из репозитория (`cargo add --git` выше) в строке будет еще `git = "https://github.com/runinfra/brokapi"`. Из клона подключают по пути: `brokapi = { path = "../brokapi", features = ["tbank"] }`. В коде все лежит под
+Из репозитория (`cargo add --git` выше) в строке будет еще `git = "https://github.com/gnatovskie/brokapi"`. Из клона подключают по пути: `brokapi = { path = "../brokapi", features = ["tbank"] }`. В коде все лежит под
 `brokapi::`: общее в `brokapi::core` и `brokapi::runtime`, брокеры в `brokapi::bcs`, `brokapi::tbank`, `brokapi::finam`, `brokapi::alor`, `brokapi::bybit`, их
 клиенты нижнего слоя в `brokapi::bcs::protocol` и так далее. `cargo build` должен собрать проект без ошибок. Не собрал:
 таблица «Если что-то пошло не так» на странице [Установка](../install.md#если-что-то-пошло-не-так).
@@ -43,7 +43,7 @@ dotenvy = "0.15"
 
 ## Сначала без токена: на имитации
 
-Токен и счет нужны не сразу. В клоне репозитория (`git clone https://github.com/runinfra/brokapi`) пример БКС запускается на имитации, которая
+Токен и счет нужны не сразу. В клоне репозитория (`git clone https://github.com/gnatovskie/brokapi`) пример БКС запускается на имитации, которая
 живет в вашем процессе и говорит на протоколе БКС: без сети, без счета, без денег.
 
 ```bash

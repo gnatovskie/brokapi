@@ -30,7 +30,7 @@ dynamic = ["version"]
 [project.urls]
 Documentation = "https://brokapi.ru/docs/python/"
 Homepage = "https://brokapi.ru/"
-Repository = "https://github.com/runinfra/brokapi"
+Repository = "https://github.com/gnatovskie/brokapi"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-asyncio>=1.0", "pytest-timeout>=2.3"]

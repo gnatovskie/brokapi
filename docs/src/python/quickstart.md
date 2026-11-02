@@ -20,7 +20,7 @@ pip install brokapi
 это несколько минут. Подробности и частые ошибки - на странице [Установка](../install.md)):
 
 ```bash
-pip install "git+https://github.com/runinfra/brokapi#subdirectory=crates/python"
+pip install "git+https://github.com/gnatovskie/brokapi#subdirectory=crates/python"
 ```
 
 Проверка:

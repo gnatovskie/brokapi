@@ -4,7 +4,7 @@
 [Python](python/quickstart.md).
 
 > Открытая альфа: интерфейс до беты может меняться. Перед первой заявкой на счете прочитайте [Перед боевым счетом](before-live.md).
-> Код открыт: `https://github.com/runinfra/brokapi`. Ниже в каждом разделе команда для пакета и для самой свежей версии из репозитория.
+> Код открыт: `https://github.com/gnatovskie/brokapi`. Ниже в каждом разделе команда для пакета и для самой свежей версии из репозитория.
 
 ## Что понадобится
 
@@ -27,7 +27,7 @@ cargo add brokapi --features bcs
 Самая свежая версия, из репозитория:
 
 ```bash
-cargo add --git https://github.com/runinfra/brokapi brokapi --features bcs
+cargo add --git https://github.com/gnatovskie/brokapi brokapi --features bcs
 ```
 
 Обе команды добавляют зависимость в `Cargo.toml`. Для программ из быстрого старта нужны еще `tokio` и `dotenvy`:
@@ -61,7 +61,7 @@ pip install brokapi
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install "git+https://github.com/runinfra/brokapi#subdirectory=crates/python"
+pip install "git+https://github.com/gnatovskie/brokapi#subdirectory=crates/python"
 ```
 
 Из клона репозитория: `pip install ./crates/python`.
@@ -81,7 +81,7 @@ python -c "import brokapi; print(brokapi.__version__)"
 
 | Что видно | Что значит | Что делать |
 |---|---|---|
-| Git спрашивает имя и пароль или пишет `Repository not found` | Опечатка в адресе репозитория | Сверить адрес: `https://github.com/runinfra/brokapi`. Или ставить пакет: `cargo add brokapi`, `pip install brokapi` |
+| Git спрашивает имя и пароль или пишет `Repository not found` | Опечатка в адресе репозитория | Сверить адрес: `https://github.com/gnatovskie/brokapi`. Или ставить пакет: `cargo add brokapi`, `pip install brokapi` |
 | `error: package ... requires rustc 1.88` | Версия Rust старее нужной | `rustup update` |
 | `pip` пишет, что не нашел `cargo` или `rustc`, при установке из репозитория | Расширение Python собирается из исходников, нужен Rust | Поставить Rust через [rustup](https://rustup.rs) и повторить |
 | `ModuleNotFoundError: No module named 'brokapi'` | Пакет поставлен в другое окружение | Активировать то окружение, в которое ставили (`. .venv/bin/activate`), и проверить `python -m pip show brokapi` |
@@ -95,7 +95,7 @@ Gateway - это программа `brokapi`: служба и команды в
 
 ### Готовый файл
 
-Файлы лежат на [странице выпусков](https://github.com/runinfra/brokapi/releases), в выпуске `v{{brokapi_version}}` и в каждом следующем. В выпуске пять архивов
+Файлы лежат на [странице выпусков](https://github.com/gnatovskie/brokapi/releases), в выпуске `v{{brokapi_version}}` и в каждом следующем. В выпуске пять архивов
 и файл с суммами `SHA256SUMS`:
 
 | Система | Архив |
@@ -115,8 +115,8 @@ Linux и macOS, на примере Linux x86_64 (для другой систе
 ```bash
 V={{brokapi_version}}
 F=brokapi-$V-linux-x86_64.tar.gz
-curl -fLO https://github.com/runinfra/brokapi/releases/download/v$V/$F
-curl -fLO https://github.com/runinfra/brokapi/releases/download/v$V/SHA256SUMS
+curl -fLO https://github.com/gnatovskie/brokapi/releases/download/v$V/$F
+curl -fLO https://github.com/gnatovskie/brokapi/releases/download/v$V/SHA256SUMS
 grep "$F" SHA256SUMS | sha256sum -c -        # на macOS: shasum -a 256 -c -
 tar -xzf $F
 mkdir -p ~/.local/bin && cp brokapi-$V-linux-x86_64/brokapi ~/.local/bin/
@@ -131,8 +131,8 @@ Windows, PowerShell:
 ```powershell
 $V = "{{brokapi_version}}"
 $F = "brokapi-$V-windows-x86_64.zip"
-curl.exe -fLO "https://github.com/runinfra/brokapi/releases/download/v$V/$F"
-curl.exe -fLO "https://github.com/runinfra/brokapi/releases/download/v$V/SHA256SUMS"
+curl.exe -fLO "https://github.com/gnatovskie/brokapi/releases/download/v$V/$F"
+curl.exe -fLO "https://github.com/gnatovskie/brokapi/releases/download/v$V/SHA256SUMS"
 (Get-FileHash $F -Algorithm SHA256).Hash.ToLower()   # эта сумма должна совпасть
 Select-String -Path SHA256SUMS -Pattern $F           # с суммой в этой строке
 Expand-Archive $F -DestinationPath .
@@ -154,7 +154,7 @@ cargo install brokapi-gateway --version {{brokapi_version}} --locked
 Самая свежая версия, из клона репозитория:
 
 ```bash
-git clone https://github.com/runinfra/brokapi
+git clone https://github.com/gnatovskie/brokapi
 cd brokapi
 cargo install --path crates/gateway --locked
 ```

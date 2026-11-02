@@ -97,7 +97,7 @@ flowchart TB
 
 ## Как проверить
 
-Для этой команды нужен клон репозитория (`git clone https://github.com/runinfra/brokapi`, затем `pip install brokapi pytest pytest-asyncio`): тесты и примеры в пакет `pip install brokapi` не входят.
+Для этой команды нужен клон репозитория (`git clone https://github.com/gnatovskie/brokapi`, затем `pip install brokapi pytest pytest-asyncio`): тесты и примеры в пакет `pip install brokapi` не входят.
 
 ```bash
 cd crates/python

@@ -15,7 +15,7 @@
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install "git+https://github.com/runinfra/brokapi#subdirectory=crates/python"   # из клона: pip install ./crates/python
+pip install "git+https://github.com/gnatovskie/brokapi#subdirectory=crates/python"   # из клона: pip install ./crates/python
 python -c "import brokapi; print(brokapi.__version__)"
 ```
 

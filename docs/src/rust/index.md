@@ -8,7 +8,7 @@
 ## С чего начать
 
 Один крейт `brokapi`, брокеры включаются флагами `bcs`, `tbank`, `finam`, `alor`, `bybit`. Команда - `cargo add brokapi --features bcs`,
-самая свежая версия из репозитория - `cargo add --git https://github.com/runinfra/brokapi brokapi --features bcs`. Подробности: [Установка](../install.md). Первый
+самая свежая версия из репозитория - `cargo add --git https://github.com/gnatovskie/brokapi brokapi --features bcs`. Подробности: [Установка](../install.md). Первый
 шаг быстрого старта - получить библиотеку, дальше переменные `.env`: [Быстрый старт на Rust](quickstart.md).
 
 ## Инструкции по задачам

@@ -139,7 +139,7 @@ async def test_the_bot_behind_a_gateway():
 
 В `crates/python/tests/`: чтение и заявки на каждом брокере (`test_brokers.py`), общие правила (`test_bcs.py`), общие счетчики лимитов,
 слияние потоков и история (`test_infrastructure.py`), точные числа и ошибки (`test_codec.py`, `test_errors.py`, `test_numbers.py`),
-примеры книги (`test_examples.py`, `test_rules.py`, `test_guides.py`), рычаги имитаций (`test_mocks.py`). Тесты лежат в клоне репозитория (`git clone https://github.com/runinfra/brokapi`), в пакет `pip install brokapi` они не входят. Запуск:
+примеры книги (`test_examples.py`, `test_rules.py`, `test_guides.py`), рычаги имитаций (`test_mocks.py`). Тесты лежат в клоне репозитория (`git clone https://github.com/gnatovskie/brokapi`), в пакет `pip install brokapi` они не входят. Запуск:
 
 ```bash
 cd crates/python

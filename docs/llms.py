@@ -246,7 +246,7 @@ def python_index(sections, book):
         "> Пакет brokapi для Python (pip install brokapi, Python 3.10+) - тонкая обертка над ядром brokapi на Rust: БКС, Т-Банк, "
         "Финам, АЛОР, Bybit. События через async for, деньги и цены через decimal.Decimal, ошибки с теми же именами и текстом, что у ядра "
         "(Unknown, Rejected, RateLimited, NotReconciled, Degraded). Стадия: открытая альфа. Bybit проверен вживую, БКС, Т-Банк, Финам и АЛОР только на имитациях: для боевого счета сначала прочитайте before-live.md и agents/unverified.md. "
-        "Ставится с PyPI: pip install brokapi. Самая свежая версия - из репозитория (pip install \"git+https://github.com/runinfra/brokapi#subdirectory=crates/python\", нужен Rust). Документация: %s/" % BASE_URL,
+        "Ставится с PyPI: pip install brokapi. Самая свежая версия - из репозитория (pip install \"git+https://github.com/gnatovskie/brokapi#subdirectory=crates/python\", нужен Rust). Документация: %s/" % BASE_URL,
         "",
         "Человек попросил бота: начните с agent-setup.md (порядок разговора, три остановки, python -m brokapi new). "
         "Как писать код. 1) Прочитайте \"Контракт для агентов\": обязательные правила одни для любого языка (торговля только после "

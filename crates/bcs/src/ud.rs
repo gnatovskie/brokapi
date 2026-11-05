@@ -9,7 +9,7 @@ use brokapi_bcs_protocol::error::BcsApiError;
 use brokapi_bcs_protocol::http::client::BcsHttpClient;
 use brokapi_bcs_protocol::http::models::{
     CancelByIdRequest, CreateOrderRequest, EditOrderRequest, OrderRecord, OrderSearchRequest,
-    OrderStateListResponse, TradeSearchRequest,
+    OrderStateListResponse, OrderType as BcsOrderType, TradeSearchRequest,
 };
 use brokapi_bcs_protocol::models::enums::OrderSide as BcsOrderSide;
 use brokapi_bcs_protocol::ws::client::BcsWsClient;
@@ -896,7 +896,13 @@ impl OrderExecutor for UserDataConnector {
             order_id_type: Some("1".into()),
             order_id: req.original_cid.hyphenated().to_string(),
             client_order_id: req.cid,
-            order_type: None,
+            // The live broker refuses an edit without it (REQUIRED_FIELD, 05.11.2026). An order with a price
+            // is a limit order, the one edit that makes sense.
+            order_type: Some(if price.is_some() {
+                BcsOrderType::Limit
+            } else {
+                BcsOrderType::Market
+            }),
             price,
             order_quantity: qty,
             extras: Default::default(),

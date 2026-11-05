@@ -1338,7 +1338,11 @@ fn handle_orders(
         return Some(json_response(StatusCode::OK, &resp.to_string()));
     }
 
-    // Edit: the original is replaced, a new order appears under the new cid.
+    // Edit: the original is replaced, a new order appears under the new cid. The live broker refuses an
+    // edit without `orderType` (REQUIRED_FIELD, 05.11.2026), though the docs do not mark it required.
+    if parsed["orderType"].is_null() {
+        return Some(validation("orderType", "required"));
+    }
     if book
         .orders
         .iter()

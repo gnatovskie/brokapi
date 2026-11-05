@@ -7,8 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use brokapi_bcs_protocol::http::client::BcsHttpClient;
 use brokapi_bcs_protocol::http::models::{
-    CandlesRequest, DailyScheduleRequest, InstrumentsByIsinsRequest, InstrumentsByTickersRequest,
-    InstrumentsByTypeRequest, LastTradesRequest, OrderBookRequest, TradingStatusRequest,
+    CandlesRequest, DailyScheduleRequest, InstrumentInfo, InstrumentsByIsinsRequest,
+    InstrumentsByTickersRequest, InstrumentsByTypeRequest, LastTradesRequest, OrderBookRequest,
+    TradingStatusRequest,
 };
 use brokapi_bcs_protocol::ws::client::BcsWsClient;
 use brokapi_bcs_protocol::ws::models::MarketDataSubscribe;
@@ -342,6 +343,33 @@ impl MarketDataConnector {
 
     async fn acquire(&self, method: &str) -> Result<(), Error> {
         self.inner.limiter.acquire(method, brokapi_runtime::now())
+    }
+
+    /// The directory record of the ticker that is for this board. One ticker can come as several
+    /// records, one per exchange (SBER: SPBRU first, then TQBR, live 05.11.2026), and one record can
+    /// list several boards of its exchange. The asked board decides, not the order or the primary.
+    async fn record_for_board(&self, id: &InstrumentId, cc: &str) -> Result<InstrumentInfo, Error> {
+        self.acquire("GetInstrumentsByTickers").await?;
+        let infos = self
+            .inner
+            .http
+            .get_instruments_by_tickers(
+                &InstrumentsByTickersRequest {
+                    tickers: vec![ticker(id)?],
+                },
+                None,
+                None,
+            )
+            .await
+            .map_err(map_err)?;
+        infos
+            .into_iter()
+            .find(|info| info.trades_on(cc))
+            .ok_or_else(|| {
+                Error::Transport(brokapi_core::TransportError::Message(
+                    "instrument not found".into(),
+                ))
+            })
     }
 
     async fn register_md_sub(
@@ -702,55 +730,19 @@ impl InstrumentSource for MarketDataConnector {
     }
 
     async fn get(&self, id: &InstrumentId) -> Result<Instrument, Error> {
-        let t = ticker(id)?;
         let cc = class_code(id)?;
-        let list = self
-            .find(InstrumentQuery::ByTicker {
-                ticker: t,
-                exchange: None,
-            })
-            .await?;
-        // One record per exchange (SBER: SPBRU, then TQBR): the card of the asked board.
-        list.into_iter()
-            .find(|i| class_code(&i.id).is_ok_and(|c| c == cc))
-            .ok_or_else(|| {
-                Error::Transport(brokapi_core::TransportError::Message(
-                    "instrument not found".into(),
-                ))
-            })
+        let info = self.record_for_board(id, &cc).await?;
+        Ok(map_instrument_info(&info, &cc))
     }
 
     async fn trading_params(&self, id: &InstrumentId) -> Result<TradingParams, Error> {
-        self.acquire("GetInstrumentsByTickers").await?;
-        let t = ticker(id)?;
         let cc = class_code(id)?;
-        let infos = self
-            .inner
-            .http
-            .get_instruments_by_tickers(
-                &InstrumentsByTickersRequest {
-                    tickers: vec![t.clone()],
-                },
-                None,
-                None,
-            )
-            .await
-            .map_err(map_err)?;
-        if infos.is_empty() {
-            return Err(Error::Transport(brokapi_core::TransportError::Message(
-                "instrument not found".into(),
-            )));
-        }
-        // One ticker can come as several records, one per exchange: SBER is first SPBRU, then TQBR
-        // (live, 05.11.2026). The record of the asked board is the one, not the first.
-        let snap = infos
-            .iter()
-            .find_map(|info| info.trading_params_for_board(&cc))
-            .ok_or_else(|| {
-                Error::Transport(brokapi_core::TransportError::Message(
-                    "trading params unavailable".into(),
-                ))
-            })?;
+        let info = self.record_for_board(id, &cc).await?;
+        let snap = info.trading_params_for_board(&cc).ok_or_else(|| {
+            Error::Transport(brokapi_core::TransportError::Message(
+                "trading params unavailable".into(),
+            ))
+        })?;
         Ok(map_trading_params(&snap))
     }
 

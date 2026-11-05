@@ -1027,8 +1027,12 @@ async fn handle_http(
 
     if path == INSTRUMENTS_TICKERS_PATH && method == Method::POST {
         // As the live API (05.11.2026): a ticker traded on two exchanges is two records, and the
-        // SPB Exchange one comes first.
-        let moex = fixture("rest/instrument_info.json");
+        // SPB Exchange one comes first. One record can list several boards of its exchange: the
+        // MOEX one has the odd-lot board SMAL after the primary TQBR.
+        let moex = fixture("rest/instrument_info.json").replace(
+            r#"{ "classCode": "TQBR", "exchange": "MOEX" }"#,
+            r#"{ "classCode": "TQBR", "exchange": "MOEX" }, { "classCode": "SMAL", "exchange": "MOEX" }"#,
+        );
         let spb = moex
             .replace(
                 r#""classCode": "TQBR", "exchange": "MOEX""#,

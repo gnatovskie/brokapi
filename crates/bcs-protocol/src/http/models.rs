@@ -494,7 +494,7 @@ impl InstrumentInfo {
     /// # Ok::<(), serde_json::Error>(())
     /// ```
     pub fn trading_params_for_board(&self, class_code: &str) -> Option<TradingParamsSnapshot> {
-        if !self.boards.is_empty() && !self.boards.iter().any(|b| b.class_code == class_code) {
+        if !self.trades_on(class_code) {
             return None;
         }
 
@@ -512,6 +512,24 @@ impl InstrumentInfo {
                 .clone()
                 .unwrap_or_else(|| "RUB".to_string()),
         })
+    }
+
+    /// Whether the record is for this board (class code): it is one of [`InstrumentInfo::boards`],
+    /// primary or not. A record that lists no boards is taken as one for any board.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use brokapi_bcs_protocol::http::models::InstrumentInfo;
+    ///
+    /// let info: InstrumentInfo = serde_json::from_str(
+    ///     r#"{"ticker":"SBER","primaryBoard":"TQBR","boards":[{"classCode":"TQBR","exchange":"MOEX"},{"classCode":"SMAL","exchange":"MOEX"}]}"#,
+    /// )?;
+    /// assert!(info.trades_on("TQBR") && info.trades_on("SMAL") && !info.trades_on("SPBRU"));
+    /// # Ok::<(), serde_json::Error>(())
+    /// ```
+    pub fn trades_on(&self, class_code: &str) -> bool {
+        self.boards.is_empty() || self.boards.iter().any(|b| b.class_code == class_code)
     }
 
     /// Builds [`TradingParamsSnapshot`] for the primary board of the instrument.

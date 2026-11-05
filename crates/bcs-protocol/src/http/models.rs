@@ -1584,11 +1584,11 @@ pub struct OrderExtras {
     pub expiry_date: Option<String>,
     /// Stop price of a conditional order. Required for scenarios with a stop-loss.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "rust_decimal::serde::arbitrary_precision_option::serialize")]
+    #[serde(serialize_with = "crate::utils::wire::command_number::serialize")]
     pub stop_price: Option<Decimal>,
     /// Take-profit price of a conditional order. Required for scenarios with a take-profit.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "rust_decimal::serde::arbitrary_precision_option::serialize")]
+    #[serde(serialize_with = "crate::utils::wire::command_number::serialize")]
     pub take_price: Option<Decimal>,
     /// Shown quantity of an iceberg order, below `order_quantity`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1601,14 +1601,14 @@ pub struct OrderExtras {
     pub execution_stop_loss_type: Option<i32>,
     /// Protective spread of a conditional order.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "rust_decimal::serde::arbitrary_precision_option::serialize")]
+    #[serde(serialize_with = "crate::utils::wire::command_number::serialize")]
     pub spread: Option<Decimal>,
     /// `0` price currency, `1` percent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spread_type: Option<i32>,
     /// Offset of a conditional order.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "rust_decimal::serde::arbitrary_precision_option::serialize")]
+    #[serde(serialize_with = "crate::utils::wire::command_number::serialize")]
     pub offset: Option<Decimal>,
     /// `0` price currency, `1` percent.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1665,7 +1665,7 @@ pub struct CreateOrderRequest {
     pub class_code: String,
     /// Price per piece, above 0, up to 8 decimals. Left out for a market order.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "rust_decimal::serde::arbitrary_precision_option::serialize")]
+    #[serde(serialize_with = "crate::utils::wire::command_number::serialize")]
     pub price: Option<Decimal>,
     /// Optional parameters (time in force, stops, iceberg, spread, offset), flattened into the body.
     #[serde(flatten)]
@@ -1775,7 +1775,7 @@ pub struct ModifyOrderRequest {
     pub order_quantity: i64,
     /// New price per piece. Left out when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "rust_decimal::serde::arbitrary_precision_option::serialize")]
+    #[serde(serialize_with = "crate::utils::wire::command_number::serialize")]
     pub price: Option<Decimal>,
 }
 
@@ -1862,7 +1862,7 @@ pub struct EditOrderRequest {
     pub order_type: Option<OrderType>,
     /// Price of the new order per piece. Left out when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(serialize_with = "rust_decimal::serde::arbitrary_precision_option::serialize")]
+    #[serde(serialize_with = "crate::utils::wire::command_number::serialize")]
     pub price: Option<Decimal>,
     /// Quantity of the new order, in pieces.
     pub order_quantity: i64,
@@ -1894,8 +1894,9 @@ pub struct OrderStateListResponse {
     /// The `clientOrderId` you gave when you placed the order. Same as [`OrderStatusResponse::original_client_order_id`].
     #[serde(default)]
     pub original_client_order_id: Option<String>,
-    /// The reports of the order. Empty if the broker sent none.
-    #[serde(default)]
+    /// The reports of the order. Empty if the broker sent none. The docs describe a list, the live
+    /// `GET /orders` sends one object: both are read.
+    #[serde(default, deserialize_with = "crate::utils::wire::one_or_many")]
     pub data: Vec<OrderExecutionData>,
 }
 
@@ -2043,7 +2044,12 @@ pub struct OrderExecutionData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reject_reason: Option<String>,
     /// Time in force: `1` Day, `2` Fill Or Kill, `3` Good Till Date. Shown for market, limit and algorithmic orders.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The docs say an integer, the live API sends text (`"1"`): both are read.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::utils::wire::int_or_text"
+    )]
     pub time_in_force: Option<i32>,
     /// End date `YYYYMMDD`, shown when `time_in_force` is 3.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -703,17 +703,21 @@ impl InstrumentSource for MarketDataConnector {
 
     async fn get(&self, id: &InstrumentId) -> Result<Instrument, Error> {
         let t = ticker(id)?;
+        let cc = class_code(id)?;
         let list = self
             .find(InstrumentQuery::ByTicker {
                 ticker: t,
                 exchange: None,
             })
             .await?;
-        list.into_iter().next().ok_or_else(|| {
-            Error::Transport(brokapi_core::TransportError::Message(
-                "instrument not found".into(),
-            ))
-        })
+        // One record per exchange (SBER: SPBRU, then TQBR): the card of the asked board.
+        list.into_iter()
+            .find(|i| class_code(&i.id).is_ok_and(|c| c == cc))
+            .ok_or_else(|| {
+                Error::Transport(brokapi_core::TransportError::Message(
+                    "instrument not found".into(),
+                ))
+            })
     }
 
     async fn trading_params(&self, id: &InstrumentId) -> Result<TradingParams, Error> {
@@ -732,16 +736,21 @@ impl InstrumentSource for MarketDataConnector {
             )
             .await
             .map_err(map_err)?;
-        let info = infos.first().ok_or_else(|| {
-            Error::Transport(brokapi_core::TransportError::Message(
+        if infos.is_empty() {
+            return Err(Error::Transport(brokapi_core::TransportError::Message(
                 "instrument not found".into(),
-            ))
-        })?;
-        let snap = info.trading_params_for_board(&cc).ok_or_else(|| {
-            Error::Transport(brokapi_core::TransportError::Message(
-                "trading params unavailable".into(),
-            ))
-        })?;
+            )));
+        }
+        // One ticker can come as several records, one per exchange: SBER is first SPBRU, then TQBR
+        // (live, 05.11.2026). The record of the asked board is the one, not the first.
+        let snap = infos
+            .iter()
+            .find_map(|info| info.trading_params_for_board(&cc))
+            .ok_or_else(|| {
+                Error::Transport(brokapi_core::TransportError::Message(
+                    "trading params unavailable".into(),
+                ))
+            })?;
         Ok(map_trading_params(&snap))
     }
 

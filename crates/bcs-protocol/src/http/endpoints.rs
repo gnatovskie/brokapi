@@ -232,7 +232,8 @@ impl BcsHttpClient {
     /// let found = client
     ///     .get_instruments_by_tickers(&InstrumentsByTickersRequest { tickers: vec!["SBER".into()] }, None, None)
     ///     .await?;
-    /// let params = found[0].trading_params_primary().expect("a primary board");
+    /// // One record per exchange: SBER comes as SPBRU and as TQBR, pick the board you trade on.
+    /// let params = found.iter().find_map(|i| i.trading_params_for_board("TQBR")).expect("TQBR");
     /// assert_eq!(params.class_code, "TQBR");
     /// # Ok(())
     /// # }

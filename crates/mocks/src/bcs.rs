@@ -263,12 +263,22 @@ impl MockOrder {
         })
     }
 
-    /// Answer of `GET /orders` and of the sync methods: `data` is a list of reports.
+    /// Answer of the sync methods: `data` is a list of reports, as in the docs.
     fn state_list(&self, request_id: &str) -> Value {
         json!({
             "clientOrderId": request_id,
             "originalClientOrderId": self.cid,
             "data": [self.data("12", Decimal::ZERO, None)],
+        })
+    }
+
+    /// Answer of `GET /orders` as the live API sends it (05.11.2026): `data` is one report, not the
+    /// list of the docs.
+    fn state_one(&self, request_id: &str) -> Value {
+        json!({
+            "clientOrderId": request_id,
+            "originalClientOrderId": self.cid,
+            "data": self.data("12", Decimal::ZERO, None),
         })
     }
 
@@ -1016,8 +1026,16 @@ async fn handle_http(
     }
 
     if path == INSTRUMENTS_TICKERS_PATH && method == Method::POST {
-        let wrapped = format!("[{}]", fixture("rest/instrument_info.json"));
-        return json_response(StatusCode::OK, &wrapped);
+        // As the live API (05.11.2026): a ticker traded on two exchanges is two records, and the
+        // SPB Exchange one comes first.
+        let moex = fixture("rest/instrument_info.json");
+        let spb = moex
+            .replace(
+                r#""classCode": "TQBR", "exchange": "MOEX""#,
+                r#""classCode": "SPBRU", "exchange": "SPB""#,
+            )
+            .replace(r#""primaryBoard": "TQBR""#, r#""primaryBoard": "SPBRU""#);
+        return json_response(StatusCode::OK, &format!("[{spb},{moex}]"));
     }
     if path == INSTRUMENTS_ISINS_PATH && method == Method::POST {
         let wrapped = format!("[{}]", fixture("rest/instrument_info.json"));
@@ -1224,7 +1242,7 @@ fn handle_orders(
                 StatusCode::OK,
                 &json!({"clientOrderId": id, "originalClientOrderId": book.orders[i].cid, "data": []}).to_string(),
             ),
-            Some(i) => json_response(StatusCode::OK, &book.orders[i].state_list(&id).to_string()),
+            Some(i) => json_response(StatusCode::OK, &book.orders[i].state_one(&id).to_string()),
             None => not_found(),
         });
     }

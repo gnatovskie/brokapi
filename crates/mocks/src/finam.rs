@@ -1395,7 +1395,12 @@ impl AssetsService for Mock {
         req: Request<ps::GetAssetRequest>,
     ) -> Result<Response<ps::GetAssetResponse>, Status> {
         self.0.check_auth(&req)?;
-        let symbol = req.into_inner().symbol;
+        let r = req.into_inner();
+        let symbol = r.symbol;
+        // The live broker (09.11.2026) refuses `GetAsset` without an account.
+        if r.account_id.is_empty() {
+            return Err(Status::invalid_argument("Invalid arguments:account_id"));
+        }
         self.0.record(format!("GetAsset:{symbol}"));
         if symbol != SBER && symbol != "GAZP@MISX" {
             return Err(Status::not_found("unknown instrument"));

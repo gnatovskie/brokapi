@@ -545,13 +545,23 @@ impl MarketDataConnector {
 
     async fn get_asset(&self, symbol: &str) -> Result<pa::GetAssetResponse, Error> {
         let symbol = symbol.to_string();
+        let account = self
+            .inner
+            .rpc
+            .api
+            .tokens()
+            .account_ids()
+            .into_iter()
+            .next()
+            .unwrap_or_default();
         self.inner
             .rpc
             .read("GetAsset", |api| {
                 let req = pa::GetAssetRequest {
                     symbol: symbol.clone(),
-                    // The directory is account-independent here; params would need an account.
-                    account_id: String::new(),
+                    // The live broker refuses an empty account (`invalid_argument: account_id`, 09.11.2026), though
+                    // the answer does not depend on it: the first account of the token, as for `GetAssetParams`.
+                    account_id: account.clone(),
                 };
                 async move { api.assets().get_asset(req).await }
             })

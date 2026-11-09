@@ -1217,6 +1217,22 @@ async fn rate_limited_place_leaves_the_cid_usable() {
 
 // ------------------------------------------------------------- lot for trading, end of a period
 
+/// The live broker refuses `GetAsset` with an empty account (`invalid_argument: account_id`): the connector sends the
+/// first account of the token, so `get` and `trading_params` work on a real account.
+#[tokio::test]
+async fn an_instrument_is_read_with_the_account_of_the_token() {
+    let server = MockServer::start().await;
+    let (md, _rx) = md(&server).await;
+    let p = md.trading_params(&sber()).await.unwrap();
+    assert_eq!(p.lot_size.decimal(), dec!(10.0));
+    assert_eq!(
+        server.state.count_calls("GetAsset:SBER@MISX"),
+        1,
+        "{:?}",
+        server.state.calls()
+    );
+}
+
 #[tokio::test]
 async fn trade_lot_size_replaces_the_lot_of_the_directory_only_when_it_is_above_zero() {
     let server = MockServer::start().await;

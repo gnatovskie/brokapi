@@ -79,6 +79,20 @@ pub fn nanos_to_datetime(nanos: UnixNanos) -> DateTime<Utc> {
     }
 }
 
+/// A time as the trade search (`POST /trades/search`) takes it: `yyyy-MM-dd'T'HH:mm:ss.SSSX`, UTC, exactly
+/// three digits of milliseconds. The broker refuses RFC 3339 without them (`INVALID_FORMAT`).
+///
+/// ```
+/// use brokapi_bcs::util::trade_search_time;
+/// use brokapi_core::UnixNanos;
+///
+/// assert_eq!(trade_search_time(UnixNanos::from_nanos(1_500_000_000)), "1970-01-01T00:00:01.500Z");
+/// ```
+#[must_use]
+pub fn trade_search_time(nanos: UnixNanos) -> String {
+    nanos_to_datetime(nanos).to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
 /// Returns the class code (trading board, for example `TQBR`) of an instrument id.
 ///
 /// # Errors

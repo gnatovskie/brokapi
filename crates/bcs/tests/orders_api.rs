@@ -15,9 +15,9 @@ use brokapi_bcs_protocol::config::BcsConfig;
 use brokapi_conformance::REJECT_PRICE;
 use brokapi_core::{
     ClientOrderId, Envelope, Error, Event, ExecutionSource, InstrumentId, InstrumentKey, NativeId,
-    OrderExecutor, OrderState, OrderType, PlaceOrderRequest, PlaceStopOrderRequest, Price, Qty,
-    ReplaceOrderRequest, ShutdownMode, Side, StopExpiry, StopOrderExecutor, StopOrderKind,
-    StopOrderRef, StopOrderState, TimeRange, UnixNanos,
+    OrderExecutor, OrderState, OrderType, PlaceOrderRequest, PlaceStopOrderRequest,
+    PortfolioSource, Price, Qty, ReplaceOrderRequest, ShutdownMode, Side, StopExpiry,
+    StopOrderExecutor, StopOrderKind, StopOrderRef, StopOrderState, TimeRange, UnixNanos,
 };
 use brokapi_runtime::{BrokerLimiter, BrokerLimits};
 use mock_server::{MockOptions, MockServer, REJECT_IN_BODY_PRICE};
@@ -456,6 +456,41 @@ async fn own_trades_history_reads_the_flat_records_of_the_docs() {
     assert!(!first.trade_id.is_empty() && !exec_id.is_empty());
     // The history record has no clientOrderId: the cid is not invented.
     assert_eq!(first.cid, None);
+    ud.shutdown(ShutdownMode::Immediate).await;
+}
+
+/// The live broker lists every asset once per settlement term (`T0`, `T1`, `T2`, `T365`). A position is one
+/// holding with what the fills of the day did to it, not a holding per term: 09.11.2026 a bought share was
+/// reported three times.
+#[tokio::test]
+async fn a_holding_is_one_position_with_the_fills_of_the_day_whatever_the_terms() {
+    let server = MockServer::start(Arc::new(MockOptions::default())).await;
+    let (ud, _rx) = ud(&server).await;
+    let sber_of = |ps: &[brokapi_core::Position]| -> Vec<Decimal> {
+        ps.iter()
+            .filter(|p| p.instrument.key.display() == sber().key.display())
+            .map(|p| p.qty.decimal())
+            .collect()
+    };
+    assert_eq!(sber_of(&ud.positions().await.unwrap()), vec![dec!(10)]);
+
+    let req = limit_buy(dec!(100.0));
+    let cid = req.cid;
+    ud.place(req).await.unwrap();
+    server.fill(&cid.hyphenated().to_string(), Qty::from(3), Price::from(99));
+    let portfolio = ud.portfolio().await.unwrap();
+    assert_eq!(sber_of(&portfolio.positions), vec![dec!(13)]);
+    let rub: Vec<_> = portfolio
+        .balances
+        .iter()
+        .filter(|b| b.currency == "RUB")
+        .collect();
+    assert_eq!(
+        rub.len(),
+        1,
+        "one balance per currency: {:?}",
+        portfolio.balances
+    );
     ud.shutdown(ShutdownMode::Immediate).await;
 }
 

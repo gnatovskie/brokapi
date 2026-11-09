@@ -1875,7 +1875,7 @@ pub struct EditOrderRequest {
     pub order_id: String,
     /// The id of the **new** order that replaces the original. A new UUID.
     pub client_order_id: Uuid,
-    /// Type of the new order. Left out when `None`.
+    /// Type of the new order. Left out when `None`, but the live broker refuses an edit without it (`REQUIRED_FIELD`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub order_type: Option<OrderType>,
     /// Price of the new order per piece. Left out when `None`.

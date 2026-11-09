@@ -50,7 +50,7 @@ use crate::map::whole_pieces;
 use crate::pump::{drain_backlog, run_ud_pump};
 use crate::raw::BcsRaw;
 use crate::subs::{SubIdGen, UdSubKind, UdSubscription};
-use crate::util::{class_code, nanos_to_datetime, ticker};
+use crate::util::{class_code, ticker, trade_search_time};
 
 struct UdShared {
     http: BcsHttpClient,
@@ -1056,8 +1056,8 @@ impl ExecutionSource for UserDataConnector {
     /// as for any read.
     async fn executions(&self, range: TimeRange) -> Result<Vec<Execution>, Error> {
         let req = TradeSearchRequest {
-            start_date_time: nanos_to_datetime(range.from).to_rfc3339(),
-            end_date_time: nanos_to_datetime(range.to).to_rfc3339(),
+            start_date_time: trade_search_time(range.from),
+            end_date_time: trade_search_time(range.to),
             side: None,
             tickers: None,
         };

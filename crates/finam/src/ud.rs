@@ -1254,8 +1254,9 @@ impl ExecutionSource for UserDataConnector {
     /// range. That Finam sorts the answer by time and cuts it at the limit is not verified against the
     /// live API, the paging works for both directions of sort.
     ///
-    /// The commission is in the account currency, its currency code is not part of `Execution`. Only
-    /// historical trades carry a commission.
+    /// The commission is in the account currency, its currency code is not part of `Execution`. The API
+    /// description promises it for historical trades, but on a live account `Trades` left it empty, and
+    /// then it is 0: a commission of 0 does not prove a free fill.
     ///
     /// # Errors
     ///

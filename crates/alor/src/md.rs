@@ -33,6 +33,9 @@ use crate::util::{exchange_of_board, nanos_to_secs, ticker_board, timeframe_labe
 
 /// The most levels of an order book the broker gives (50 on each side).
 const MAX_DEPTH: u32 = 50;
+/// The deepest book a WebSocket subscription may ask for: the broker refuses more than 20 levels unless the
+/// connection is compressed, and the connector does not compress.
+const WS_MAX_DEPTH: u32 = 20;
 
 /// How many instruments a page of the search asks for, and how many pages are read at most.
 const KIND_PAGE_SIZE: u32 = 100;
@@ -265,7 +268,7 @@ impl OrderBookSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let depth = opts.depth.unwrap_or(MAX_DEPTH).clamp(1, MAX_DEPTH);
+        let depth = opts.depth.unwrap_or(WS_MAX_DEPTH).clamp(1, WS_MAX_DEPTH);
         let (ticker, board) = ticker_board(id)?;
         let guid = new_guid();
         let ws = WsSubscribe::order_book(

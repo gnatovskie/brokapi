@@ -1266,6 +1266,17 @@ async fn handle_ws(socket: WebSocket, state: MockState) {
                         .await;
                     continue;
                 }
+                // The broker refuses a deeper book without compression (seen live, 2026-11-11).
+                if opcode == "OrderBookGetAndSubscribe" && req["depth"].as_u64().unwrap_or(20) > 20
+                {
+                    let _ = write
+                        .send(status(
+                            400,
+                            "The orderbook subscription with the depth more than 20 is allowed only with enabled compression.",
+                        ))
+                        .await;
+                    continue;
+                }
                 let owner = req["token"].as_str().unwrap_or("").to_string();
                 let symbol = req["code"].as_str().unwrap_or("SBER").to_string();
                 let frames: Vec<Value> = match opcode.as_str() {

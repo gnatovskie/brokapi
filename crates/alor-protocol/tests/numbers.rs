@@ -94,3 +94,22 @@ proptest! {
         prop_assert_eq!(back.price.to_string(), price.to_string());
     }
 }
+
+#[test]
+fn an_order_number_may_arrive_as_a_number_or_a_string() {
+    use brokapi_alor_protocol::http::models::{MarketTradeRecord, TradeRecord};
+    // Seen live on 2026-11-11 (market trades of SBER, SI-12.26, USD000UTSTOM): `"orderno":0`, a number, while
+    // the schema says string. One broken item must not fail the whole list.
+    let live = r#"[{"id":18091728007,"orderno":0,"symbol":"SBER","board":"TQBR","qty":3,"price":298.25},
+                   {"id":18091728008,"orderno":"18995978560","symbol":"SBER","board":"TQBR","qty":1,"price":298.26}]"#;
+    let trades: Vec<MarketTradeRecord> = serde_json::from_str(live).unwrap();
+    assert_eq!(trades[0].orderno.as_deref(), Some("0"));
+    assert_eq!(trades[1].orderno.as_deref(), Some("18995978560"));
+
+    let own: TradeRecord =
+        serde_json::from_str(r#"{"id":"T1","orderno":41129409599,"symbol":"SBER"}"#).unwrap();
+    assert_eq!(own.orderno.as_deref(), Some("41129409599"));
+    let absent: TradeRecord =
+        serde_json::from_str(r#"{"id":"T1","orderno":null,"symbol":"SBER"}"#).unwrap();
+    assert_eq!(absent.orderno, None);
+}

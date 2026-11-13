@@ -1848,14 +1848,14 @@ impl CancelByIdRequest {
 /// ```
 /// # use rust_decimal::Decimal;
 /// # use rust_decimal_macros::dec;
-/// use brokapi_bcs_protocol::http::models::{EditOrderRequest, OrderExtras};
+/// use brokapi_bcs_protocol::http::models::{EditOrderRequest, OrderExtras, OrderType};
 /// use uuid::Uuid;
 ///
 /// let req = EditOrderRequest {
 ///     order_id_type: None,
 ///     order_id: Uuid::nil().to_string(),
 ///     client_order_id: Uuid::nil(),
-///     order_type: None,
+///     order_type: Some(OrderType::Limit),
 ///     price: Some(dec!(301.0)),
 ///     order_quantity: 5,
 ///     extras: OrderExtras::default(),

@@ -712,3 +712,24 @@ pre.mermaid, .mermaid { background: var(--bk-soft); border-color: var(--bk-line2
 #mdbook-theme-toggle .theme-moon { display: block; }
 #mdbook-menu-bar-hover-placeholder { display: none; }
 .crumbs { margin-top: 34px; }
+
+/* ===== Spacing: text keeps at least 16 px from the lines of its block (checked at 1440, 1024, 768, 390 px) ===== */
+.content table th { padding-top: 14px; padding-bottom: 14px; }
+.content table td { padding-top: 16px; padding-bottom: 16px; }
+.lang-tabs-bar { padding: 0 20px; }
+.lang-tabs-bar button { padding: 16px 16px 14px; }
+details.code-fold > summary { padding: 12px 18px; }
+.pager a, .pager a:link, .pager a:visited { padding: 20px 24px; }
+.paths li { padding: 18px 18px 18px 20px; }
+blockquote { padding: 18px 22px 18px 26px; }
+pre > code, pre > .hljs { padding: 18px 22px; }
+.book-foot-line { padding-top: 20px; }
+.search-hit { padding: 12px 14px; }
+.stub { padding: 24px 28px; }
+@media (max-width: 700px) {
+  .table-wrapper.table-cards tbody tr, .table-wrapper.table-cards tbody tr:nth-child(2n) { padding: 18px var(--inset); }
+  .lang-tabs-bar { padding: 0 12px; }
+  blockquote { padding: 16px 18px 16px 22px; }
+  pre > code, pre > .hljs { padding: 16px 18px; }
+}
+.table-wrapper.table-cards tbody tr:first-child { border-top-color: var(--bk-line2); }

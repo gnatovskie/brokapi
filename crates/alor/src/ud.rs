@@ -69,6 +69,8 @@ struct UdShared {
     order_state_buffer: usize,
     portfolio: String,
     exchange: String,
+    /// The consent to orders that may open an uncovered position (`allowMargin`), from the config.
+    allow_margin: Option<bool>,
     ack_timeout: std::time::Duration,
     /// cid -> the number of the order (and whether it is a stop order), for the orders this process placed or
     /// has seen.
@@ -262,6 +264,7 @@ impl UserDataConnector {
             order_state_buffer: cfg.order_state_buffer,
             portfolio,
             exchange: cfg.alor.exchange.clone(),
+            allow_margin: cfg.alor.allow_margin.then_some(true),
             ack_timeout: cfg.subscribe_ack_timeout,
             tracked: StdMutex::new(HashMap::new()),
             lots: StdMutex::new(HashMap::new()),
@@ -638,7 +641,7 @@ impl OrderExecutor for UserDataConnector {
                     user,
                     comment,
                     time_in_force: Some("oneday".into()),
-                    allow_margin: None,
+                    allow_margin: self.inner.allow_margin,
                     iceberg_fixed: None,
                     iceberg_variance: None,
                 };
@@ -652,7 +655,7 @@ impl OrderExecutor for UserDataConnector {
                     user,
                     comment,
                     time_in_force: Some("oneday".into()),
-                    allow_margin: None,
+                    allow_margin: self.inner.allow_margin,
                 };
                 self.inner.http.create_market_order(&req_id, &body).await
             }
@@ -773,7 +776,7 @@ impl OrderExecutor for UserDataConnector {
                 .time_in_force
                 .clone()
                 .or_else(|| Some("oneday".to_string())),
-            allow_margin: None,
+            allow_margin: self.inner.allow_margin,
             iceberg_fixed: None,
             iceberg_variance: None,
         };
@@ -1087,7 +1090,7 @@ impl StopOrderExecutor for UserDataConnector {
             .used_up(req.cid, self.lot_of(&ticker, &board, &req.instrument).await)
             .await?;
         let now_secs = chrono::Utc::now().timestamp();
-        let (wire, limit) = map_stop::build(
+        let (mut wire, limit) = map_stop::build(
             &req,
             lot,
             &self.inner.portfolio,
@@ -1095,6 +1098,7 @@ impl StopOrderExecutor for UserDataConnector {
             now_secs,
             req.cid,
         )?;
+        wire.allow_margin = self.inner.allow_margin;
         // Quota before the cid is marked: a `RateLimited` sent nothing, the cid stays usable.
         self.acquire("PlaceStopOrder")?;
         let _instrument = self.inner.instrument_locks.lock(&req.instrument).await;

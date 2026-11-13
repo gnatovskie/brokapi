@@ -15,7 +15,8 @@
   // book.js asks window.search.hasFocus() before it turns the pages with the arrow keys.
   window.search = { hasFocus: function () { return isOpen; } };
 
-  function base() { return new URL(path_to_root, window.location.href); }
+  // path_to_root is empty on the pages of the root of the book: then the base is the folder of the page, not the page itself.
+  function base() { return new URL(path_to_root || './', window.location.href); }
 
   function load() {
     if (loading) return loading;

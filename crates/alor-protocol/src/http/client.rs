@@ -93,6 +93,9 @@ impl AlorHttpClient {
     pub fn new(config: AlorConfig) -> Result<Self, AlorApiError> {
         let client = Client::builder()
             .timeout(config.request_timeout)
+            // One dead address of the name must not eat the whole request time: with several addresses the
+            // connect time is shared out between them, so the next address is tried after a few seconds.
+            .connect_timeout(Duration::from_secs(6))
             .gzip(true)
             .build()?;
         Ok(Self {

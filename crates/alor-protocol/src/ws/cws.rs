@@ -18,7 +18,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::{Instant, timeout};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use crate::error::AlorApiError;
 use crate::http::client::AlorHttpClient;
@@ -119,7 +119,7 @@ impl CwsSession {
         answer_timeout: Duration,
     ) -> Result<Self, AlorApiError> {
         let url = format!("{}{}", http.ws_base_url(), CWS_PATH);
-        let (stream, _) = connect_async(url.as_str())
+        let (stream, _) = crate::ws::connect::connect(url.as_str())
             .await
             .map_err(|e| AlorApiError::Ws {
                 code: None,

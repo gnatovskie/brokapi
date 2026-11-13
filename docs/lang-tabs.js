@@ -69,7 +69,7 @@
   function init() {
     var rel = pagePath();
     var own = pageLang(rel);
-    var current = stored() || 'rust';
+    var current = stored() || 'python';
     var uid = 0;
     var groups = [];
     var solos = [];

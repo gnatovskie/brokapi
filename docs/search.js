@@ -168,6 +168,8 @@
   toggle.addEventListener('click', function () { if (isOpen) close(); else open(); });
 
   document.addEventListener('keydown', function (e) {
+    // Ctrl+K and Cmd+K open the window from anywhere, also from a field (as in the model of variant A).
+    if (!isOpen && (e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'k' || e.key === 'K' || e.key === 'л' || e.key === 'Л')) { e.preventDefault(); open(); return; }
     if (isOpen || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key !== '/' && e.key !== 's' && e.key !== 'S' && e.key !== 'ы' && e.key !== 'Ы') return;
     var t = e.target;

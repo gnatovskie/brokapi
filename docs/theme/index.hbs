@@ -17,7 +17,7 @@
 
         <meta name="description" content="{{ description }}">
         <meta name="viewport" content="width=device-width, initial-scale=1">
-        <meta name="theme-color" content="#ffffff">
+        <meta name="theme-color" content="#0a0b0d">
 
         {{#if favicon_svg}}
         <link rel="icon" href="{{ resource "favicon.svg" }}">
@@ -33,8 +33,8 @@
         {{/if}}
 
         <!-- Fonts. The text font in both alphabets is fetched at once: the page is Russian, a late font shifts the layout. -->
-        <link rel="preload" as="font" type="font/woff2" crossorigin href="{{ resource "fonts/ibm-plex-sans-cyrillic-wght-normal.woff2" }}">
-        <link rel="preload" as="font" type="font/woff2" crossorigin href="{{ resource "fonts/ibm-plex-sans-latin-wght-normal.woff2" }}">
+        <link rel="preload" as="font" type="font/woff2" crossorigin href="{{ resource "fonts/geist-cyrillic-400-normal.woff2" }}">
+        <link rel="preload" as="font" type="font/woff2" crossorigin href="{{ resource "fonts/geist-latin-400-normal.woff2" }}">
         <link rel="stylesheet" href="{{ resource "fonts/fonts.css" }}">
 
         <!-- Highlight.js Stylesheets -->
@@ -123,8 +123,56 @@
             }
         </script>
 
+        <div id="mdbook-menu-bar" class="menu-bar sticky" role="banner">
+            <!-- Variant A (context/design.md), as in the model: the mark with "/ docs" and the version, the search field, the links and the
+                 theme. The ids are the ones book.js, search.js and lang-tabs.js look for. The contents button shows on a narrow screen only. -->
+            <div class="left-buttons">
+                <button id="mdbook-sidebar-toggle" class="icon-button" type="button" title="Оглавление" aria-label="Оглавление" aria-controls="mdbook-sidebar">
+                    {{fa "solid" "bars"}}
+                </button>
+            </div>
+
+            <div class="menu-title">{{ book_title }}</div>
+            <div class="brand">
+                <a class="brand-home" href="https://brokapi.ru/" aria-label="brokapi, brokapi.ru">
+                    <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+                        <path d="M3 8c9 0 10 8 17 8M3 16h17M3 24c9 0 10-8 17-8M20 16h4" />
+                        <circle cx="27" cy="16" r="3" />
+                    </svg>
+                    <span class="brand-word">brokapi</span>
+                </a>
+                <span class="brand-slash" aria-hidden="true">/</span>
+                <a class="brand-docs" href="{{ path_to_root }}index.html">docs</a>
+                <!-- The version is a token: docs/brokapi_version.py stamp puts the number of Cargo.toml in after the build. The badge leads to the page about the stage. -->
+                <a class="brand-ver" href="{{ path_to_root }}before-live.html" title="Открытая альфа">@@BROKAPI_VERSION@@</a>
+            </div>
+
+            <button id="brokapi-search-toggle" class="icon-button search-toggle" type="button" title="Поиск (/)" aria-label="Поиск по книге" aria-haspopup="dialog" aria-keyshortcuts="/ s">
+                    {{fa "solid" "magnifying-glass"}}<span class="search-toggle-text">Поиск по документации</span><kbd class="search-kbd" aria-hidden="true"><span class="kbd-mod">Ctrl</span>K</kbd>
+                </button>
+
+            <div class="right-buttons">
+                <a class="hd-link" href="{{ path_to_root }}changelog.html">Изменения</a>
+                <a class="hd-link" href="https://github.com/gnatovskie/brokapi">GitHub</a>
+                <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Тема" aria-label="Сменить тему" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                    <svg class="theme-moon" viewBox="0 0 20 20" aria-hidden="true"><path d="M15.5 12.5A6 6 0 0 1 7.5 4.5a6 6 0 1 0 8 8z"/></svg>
+                </button>
+                <ul id="mdbook-theme-list" class="theme-popup" aria-label="Темы" role="menu">
+                    <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Темная</button></li>
+                    <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Светлая</button></li>
+                </ul>
+            </div>
+        </div>
+
         <nav id="mdbook-sidebar" class="sidebar" aria-label="Оглавление">
             <!-- populated by js -->
+            <!-- One language for the whole site (docs/lang-tabs.js): the tabs "Rust | Python" follow it and the pages that have a twin
+                 in the other language offer to move there. As in the model of variant A, the switch is the head of the sidebar. -->
+            <div class="sidebar-lang">
+                <div class="lang-switch" role="group" aria-label="Язык примеров">
+                    <button type="button" data-lang="python" aria-pressed="false">Python</button><button type="button" data-lang="rust" aria-pressed="false">Rust</button>
+                </div>
+            </div>
             <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
             <noscript>
                 <iframe class="sidebar-iframe-outer" src="{{ path_to_root }}toc.html"></iframe>
@@ -139,63 +187,6 @@
             <div class="page">
                 {{> header}}
                 <div id="mdbook-menu-bar-hover-placeholder"></div>
-                <div id="mdbook-menu-bar" class="menu-bar sticky" role="banner">
-                    <div class="left-buttons">
-                        <button id="mdbook-sidebar-toggle" class="icon-button" type="button" title="Оглавление" aria-label="Оглавление" aria-controls="mdbook-sidebar">
-                            {{fa "solid" "bars"}}
-                        </button>
-                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Тема" aria-label="Сменить тему" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
-                            {{fa "solid" "paintbrush"}}
-                        </button>
-                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Темы" role="menu">
-                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Темная</button></li>
-                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Светлая</button></li>
-                        </ul>
-                        <!-- Search: Pagefind, docs/search.js builds the window. The index is made by docs/build.sh. -->
-                        <button id="brokapi-search-toggle" class="icon-button search-toggle" type="button" title="Поиск (/)" aria-label="Поиск по книге" aria-haspopup="dialog" aria-keyshortcuts="/ s">
-                            {{fa "solid" "magnifying-glass"}}<span class="search-toggle-text">Поиск</span>
-                        </button>
-                        {{#if print_enable}}
-                        <a class="icon-button print-link" href="{{ path_to_root }}print.html" title="Печать книги" aria-label="Печать книги">
-                            {{fa "solid" "print" "print-button"}}
-                        </a>
-                        {{/if}}
-                    </div>
-
-                    <div class="menu-title">{{ book_title }}</div>
-                    <!-- Mark and name of brokapi lead to the site brokapi.ru (same mark as on the site). The book itself has no
-                         separate link in the bar: the sidebar is its table of contents. -->
-                    <div class="brand">
-                        <a class="brand-home" href="https://brokapi.ru/" aria-label="brokapi, brokapi.ru">
-                            <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-                                <path d="M3 8c9 0 10 8 17 8M3 16h17M3 24c9 0 10-8 17-8M20 16h4" />
-                                <circle cx="27" cy="16" r="3" />
-                            </svg>
-                            <span class="brand-word">brokapi</span>
-                        </a>
-                    </div>
-
-                    <div class="right-buttons">
-                        <!-- One language for the whole site (docs/lang-tabs.js): the tabs "Rust | Python" follow it and
-                             the pages that have a twin in the other language offer to move there. -->
-                        <div class="lang-switch" role="group" aria-label="Язык примеров">
-                            <button type="button" data-lang="rust" aria-pressed="false">Rust</button><button type="button" data-lang="python" aria-pressed="false">Python</button>
-                        </div>
-                        {{#if git_repository_url}}
-                        <a href="{{git_repository_url}}" title="Репозиторий" aria-label="Репозиторий">
-                            {{fa git_repository_icon_class git_repository_icon}}
-                        </a>
-                        {{/if}}
-                        {{#if git_repository_edit_url}}
-                        <a href="{{git_repository_edit_url}}" title="Предложить правку" aria-label="Предложить правку" rel="edit">
-                            {{fa "solid" "pencil" "git-edit-button"}}
-                        </a>
-                        {{/if}}
-
-                    </div>
-                </div>
-
-
                 <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
                 <script>
                     document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
@@ -204,9 +195,6 @@
                         link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
                     });
                 </script>
-
-                <!-- Revision line: version and stage of the library. The version is a token: docs/brokapi_version.py stamp puts the number of Cargo.toml in after the build. The stage (the words) is changed here. -->
-                <aside class="stage-wrap" aria-label="Стадия проекта"><a class="stage-strip" href="{{ path_to_root }}before-live.html"><span class="rev-ver">ред. @@BROKAPI_VERSION@@</span><span class="rev-stage"><i></i>Открытая альфа</span></a></aside>
 
                 <div id="mdbook-content" class="content">
                     <div class="doc-grid">

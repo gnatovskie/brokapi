@@ -696,6 +696,136 @@ fn local_lifecycle_follows_the_stream() {
     ));
 }
 
+const ESUB: SubscriptionId = SubscriptionId(1002);
+
+/// A harness with both streams of a trading bot: order state (`USUB`) and own trades (`ESUB`).
+fn ud_harness_with_trades() -> Harness<UdCore> {
+    let mut h = ud_harness();
+    h.core_mut()
+        .register(ESUB, brokapi_finam::core::ud::UdSubKind::Executions);
+    h
+}
+
+/// A fill of the trades stream: the stream carries no comment, so only the order id names the order.
+fn stream_trade(order_id: &str) -> v1::AccountTrade {
+    v1::AccountTrade {
+        trade_id: format!("T-{order_id}"),
+        symbol: "SBER@MISX".into(),
+        price: d("292.68"),
+        size: d("1"),
+        side: v1::Side::Buy as i32,
+        order_id: order_id.into(),
+        ..Default::default()
+    }
+}
+
+fn trades_frame(trades: Vec<v1::AccountTrade>) -> UdFrame {
+    UdFrame {
+        sub: ESUB,
+        event: UdEvent::Trades(po::SubscribeTradesResponse { trades }),
+    }
+}
+
+fn executions(h: &Harness<UdCore>) -> Vec<brokapi_core::Execution> {
+    h.events()
+        .iter()
+        .filter_map(|e| match &e.payload {
+            Event::Execution(x) => Some(x.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Seen live on 10.11.2026: a market buy filled at once, and its fill came on the trades stream before the
+/// answer to `place` and before the order stream named the order. The fill must still carry our cid.
+#[test]
+fn a_fill_that_comes_before_its_order_is_known_carries_our_cid() {
+    let cid = ClientOrderId::from_bytes([7; 16]);
+    let mut h = ud_harness_with_trades();
+    let now = h.now();
+    h.core_mut().orders().register_place(cid, now);
+
+    h.feed_frame(trades_frame(vec![stream_trade("1271492")]));
+    h.feed_frame(orders_frame(vec![order(
+        "1271492",
+        po::OrderStatus::Filled,
+        Some(cid),
+        "10",
+        "0",
+    )]));
+
+    let ex = executions(&h);
+    assert_eq!(ex.len(), 1, "the fill is delivered once");
+    assert_eq!(ex[0].cid, Some(cid));
+    assert_eq!(ex[0].broker_order_id.as_str(), "1271492");
+}
+
+/// While our place waits for its answer, a fill of an order that is not ours is held too; it goes out without
+/// a cid as soon as nothing of ours is in flight.
+#[test]
+fn a_foreign_fill_held_during_our_place_goes_out_without_a_cid() {
+    let cid = ClientOrderId::from_bytes([8; 16]);
+    let mut h = ud_harness_with_trades();
+    let now = h.now();
+    h.core_mut().orders().register_place(cid, now);
+
+    h.feed_frame(trades_frame(vec![stream_trade("555")]));
+    h.feed_frame(orders_frame(vec![order(
+        "7",
+        po::OrderStatus::New,
+        Some(cid),
+        "0",
+        "10",
+    )]));
+
+    let ex = executions(&h);
+    assert_eq!(ex.len(), 1);
+    assert_eq!(ex[0].cid, None, "not our order: no cid is invented");
+    assert_eq!(ex[0].broker_order_id.as_str(), "555");
+}
+
+/// Nothing of ours in flight: a fill is delivered at once, as before.
+#[test]
+fn a_fill_with_nothing_in_flight_is_not_held() {
+    let mut h = ud_harness_with_trades();
+    h.feed_frame(trades_frame(vec![stream_trade("555")]));
+    assert_eq!(executions(&h).len(), 1);
+}
+
+/// A command can finish through its RPC response without another stream frame.
+/// The driver's maintenance callback must release held fills in that case too.
+#[test]
+fn a_held_fill_is_delivered_after_the_command_finishes_without_another_frame() {
+    use brokapi_sansio::{BrokerCore, EventSink, OrderSignal};
+    let cid = ClientOrderId::from_bytes([9; 16]);
+    for signal in [
+        OrderSignal::Timeout,
+        OrderSignal::Rejected {
+            reason: "refused".into(),
+        },
+    ] {
+        let mut h = ud_harness_with_trades();
+        let now = h.now();
+        h.core_mut().orders().register_place(cid, now);
+        h.feed_frame(trades_frame(vec![stream_trade("555")]));
+        assert!(executions(&h).is_empty());
+        h.core_mut().orders().apply_signal(cid, signal, now);
+        let mut sink = EventSink::new();
+        h.core_mut().on_timeout(now, &mut sink);
+        let delivered = sink.drain();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "a held fill must not wait for unrelated traffic"
+        );
+        assert!(
+            matches!(&delivered[0].payload, Event::Execution(x) if x.cid.is_none() && x.broker_order_id.as_str() == "555")
+        );
+        h.core_mut().on_timeout(now, &mut sink);
+        assert!(sink.drain().is_empty(), "deliver only once");
+    }
+}
+
 #[test]
 fn own_trades_carry_the_cid_when_the_order_is_ours() {
     let cid = ClientOrderId::from_bytes([5; 16]);
@@ -797,4 +927,49 @@ fn account_state_becomes_a_portfolio() {
     assert_eq!(p.positions[0].avg_price.unwrap().decimal(), dec!(250.0));
     assert_eq!(p.positions[1].qty.decimal(), dec!(-2.0));
     assert!(p.positions[1].avg_price.is_none());
+}
+
+/// Seen live on 10.11.2026: after a buy and a sell on the same day Finam keeps the instrument in
+/// `positions` with quantity 0 (and an average price of 0). The account holds nothing of it.
+#[test]
+fn a_position_closed_during_the_day_is_not_a_position() {
+    let mut h = Harness::new(UdCore::new(Arc::new(OrderIndex::new())), Instant::now());
+    h.apply(&SubscriptionSet::with_subscriptions(vec![
+        DesiredSubscription {
+            id: USUB,
+            kind: SubscriptionKind::Portfolio,
+        },
+    ]));
+    let resp = pa::GetAccountResponse {
+        account_id: "ACC1".into(),
+        positions: vec![
+            pa::Position {
+                symbol: "SBER@MISX".into(),
+                quantity: d("0.0"),
+                average_price: d("0.0"),
+                current_price: d("292.28"),
+                ..Default::default()
+            },
+            pa::Position {
+                symbol: "GAZP@MISX".into(),
+                quantity: d("10"),
+                current_price: d("120"),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    h.feed_frame(UdFrame {
+        sub: USUB,
+        event: UdEvent::Account(resp),
+    });
+    let Event::Portfolio(p) = &h.events()[0].payload else {
+        panic!()
+    };
+    let held: Vec<_> = p
+        .positions
+        .iter()
+        .map(|x| x.instrument.key.symbol.as_str())
+        .collect();
+    assert_eq!(held, ["GAZP"]);
 }

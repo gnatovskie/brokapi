@@ -317,3 +317,43 @@ async fn a_price_off_the_step_is_refused_before_anything_is_sent_and_the_cid_sta
     md.shutdown(ShutdownMode::Immediate).await;
     ud.shutdown(ShutdownMode::Immediate).await;
 }
+
+fn future_order() -> PlaceOrderRequest {
+    PlaceOrderRequest {
+        cid: ClientOrderId::new_v4(),
+        instrument: instrument_id("SiZ6", "RFUD"),
+        side: Side::Buy,
+        order_type: OrderType::Limit,
+        qty: Qty::from(1),
+        price: Some(Price::new(dec!(70000))),
+    }
+}
+
+#[tokio::test]
+async fn an_order_on_the_derivatives_market_needs_the_consent_to_an_uncovered_position() {
+    // Live, 2026-11-13: the broker refuses every order on the derivatives market of a client with the initial
+    // risk level unless the order carries `allowMargin: true`. The consent is the owner's decision, so the
+    // connector does not give it by itself.
+    let opts = Arc::new(MockOptions::default());
+    let server = MockServer::start(Arc::clone(&opts)).await;
+    let (ud, _rx) = ud(&server).await;
+    ud.reconcile(&[]).await.unwrap();
+    let err = ud.place(future_order()).await.unwrap_err();
+    assert!(
+        matches!(&err, Error::Rejected { message, .. } if message.contains("LowRiskMarginalForbidden")),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn with_the_consent_set_the_order_on_the_derivatives_market_goes_through() {
+    let opts = Arc::new(MockOptions::default());
+    let server = MockServer::start(Arc::clone(&opts)).await;
+    let (tx, _rx) = mpsc::channel(256);
+    let cfg = AlorConfig::for_mock("mock-refresh-token", &server.http_base).with_allow_margin(true);
+    let ud = UserDataConnector::start(UserDataConfig::new(cfg, "alor-ud"), limiter(), tx)
+        .await
+        .expect("ud start");
+    ud.reconcile(&[]).await.unwrap();
+    ud.place(future_order()).await.unwrap();
+}

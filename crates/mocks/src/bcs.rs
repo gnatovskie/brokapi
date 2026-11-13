@@ -263,12 +263,22 @@ impl MockOrder {
         })
     }
 
-    /// Answer of `GET /orders` and of the sync methods: `data` is a list of reports.
+    /// Answer of the sync methods: `data` is a list of reports, as in the docs.
     fn state_list(&self, request_id: &str) -> Value {
         json!({
             "clientOrderId": request_id,
             "originalClientOrderId": self.cid,
             "data": [self.data("12", Decimal::ZERO, None)],
+        })
+    }
+
+    /// Answer of `GET /orders` as the live API sends it (05.11.2026): `data` is one report, not the
+    /// list of the docs.
+    fn state_one(&self, request_id: &str) -> Value {
+        json!({
+            "clientOrderId": request_id,
+            "originalClientOrderId": self.cid,
+            "data": self.data("12", Decimal::ZERO, None),
         })
     }
 
@@ -325,29 +335,49 @@ struct Book {
     portfolio_sockets: Vec<(String, tokio::sync::mpsc::UnboundedSender<String>)>,
 }
 
+/// The settlement terms of a BCS portfolio row, settled first.
+const SETTLEMENT_TERMS: [&str; 4] = ["T0", "T1", "T2", "T365"];
+
 impl Book {
     /// The portfolio of `owner`: the recorded one with the fills on top. A holding the fills brought to zero is gone.
+    ///
+    /// Like the live broker (09.11.2026), every asset is one row per settlement term: `T0` (settled), `T1`, `T2`
+    /// and `T365` (with every trade of the day). A fill changes the forecast terms, `T0` only after settlement,
+    /// which the mock does not reach: a share bought today is in `T1`, `T2`, `T365`, not in `T0`.
     fn portfolio(&self, owner: &str) -> String {
-        let mut rows: Vec<Value> = serde_json::from_str(&fixture("ws/portfolio.json"))
+        let recorded: Vec<Value> = serde_json::from_str(&fixture("ws/portfolio.json"))
             .expect("the recorded portfolio is JSON");
+        let mut rows: Vec<Value> = recorded
+            .iter()
+            .flat_map(|r| {
+                SETTLEMENT_TERMS.iter().map(move |term| {
+                    let mut row = r.clone();
+                    row["term"] = json!(term);
+                    row
+                })
+            })
+            .collect();
         for ((who, ticker, board), (change, price)) in &self.held {
             if who != owner {
                 continue;
             }
-            let row = rows.iter_mut().find(|r| {
-                r["type"] == "depoLimit"
-                    && r["ticker"] == ticker.as_str()
-                    && r["board"] == board.as_str()
-            });
-            match row {
-                Some(row) => {
-                    let had = Decimal::from_str(&row["quantity"].to_string()).unwrap_or_default();
-                    row["quantity"] = num(had + change);
+            for term in &SETTLEMENT_TERMS[1..] {
+                let row = rows.iter_mut().find(|r| {
+                    r["type"] == "depoLimit"
+                        && r["ticker"] == ticker.as_str()
+                        && r["board"] == board.as_str()
+                        && r["term"] == *term
+                });
+                match row {
+                    Some(row) => {
+                        let had = Decimal::from_str(&row["quantity"].to_string()).unwrap_or_default();
+                        row["quantity"] = num(had + change);
+                    }
+                    None => rows.push(json!({
+                        "type": "depoLimit", "ticker": ticker, "board": board, "quantity": num(*change),
+                        "balancePrice": num(*price), "currentPrice": num(*price), "term": term,
+                    })),
                 }
-                None => rows.push(json!({
-                    "type": "depoLimit", "ticker": ticker, "board": board, "quantity": num(*change),
-                    "balancePrice": num(*price), "currentPrice": num(*price),
-                })),
             }
         }
         rows.retain(|r| r["type"] != "depoLimit" || r["quantity"].as_f64() != Some(0.0));
@@ -727,6 +757,43 @@ fn set_levels(book: &mut Value, price: Decimal, depth: usize) {
     book["asks"] = side(asks);
 }
 
+/// `yyyy-MM-dd'T'HH:mm:ss.SSSX`, the date-time the trade search accepts: exactly three digits of milliseconds,
+/// then `Z` or an offset (`+03`, `+0300`, `+03:00`).
+fn is_bcs_datetime(s: &str) -> bool {
+    let b = s.as_bytes();
+    let digits =
+        |r: std::ops::Range<usize>| b.get(r).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
+    let shape = b.len() > 23
+        && digits(0..4)
+        && b[4] == b'-'
+        && digits(5..7)
+        && b[7] == b'-'
+        && digits(8..10)
+        && b[10] == b'T'
+        && digits(11..13)
+        && b[13] == b':'
+        && digits(14..16)
+        && b[16] == b':'
+        && digits(17..19)
+        && b[19] == b'.'
+        && digits(20..23);
+    if !shape {
+        return false;
+    }
+    match &s[23..] {
+        "Z" => true,
+        z => {
+            let z = z.as_bytes();
+            matches!(z.first(), Some(b'+' | b'-'))
+                && matches!(z.len(), 3 | 5 | 6)
+                && z[1..]
+                    .iter()
+                    .enumerate()
+                    .all(|(i, c)| c.is_ascii_digit() || (z.len() == 6 && i == 2 && *c == b':'))
+        }
+    }
+}
+
 fn validation(field: &str, message: &str) -> Response {
     json_response(
         StatusCode::BAD_REQUEST,
@@ -1016,8 +1083,20 @@ async fn handle_http(
     }
 
     if path == INSTRUMENTS_TICKERS_PATH && method == Method::POST {
-        let wrapped = format!("[{}]", fixture("rest/instrument_info.json"));
-        return json_response(StatusCode::OK, &wrapped);
+        // As the live API (05.11.2026): a ticker traded on two exchanges is two records, and the
+        // SPB Exchange one comes first. One record can list several boards of its exchange: the
+        // MOEX one has the odd-lot board SMAL after the primary TQBR.
+        let moex = fixture("rest/instrument_info.json").replace(
+            r#"{ "classCode": "TQBR", "exchange": "MOEX" }"#,
+            r#"{ "classCode": "TQBR", "exchange": "MOEX" }, { "classCode": "SMAL", "exchange": "MOEX" }"#,
+        );
+        let spb = moex
+            .replace(
+                r#""classCode": "TQBR", "exchange": "MOEX""#,
+                r#""classCode": "SPBRU", "exchange": "SPB""#,
+            )
+            .replace(r#""primaryBoard": "TQBR""#, r#""primaryBoard": "SPBRU""#);
+        return json_response(StatusCode::OK, &format!("[{spb},{moex}]"));
     }
     if path == INSTRUMENTS_ISINS_PATH && method == Method::POST {
         let wrapped = format!("[{}]", fixture("rest/instrument_info.json"));
@@ -1165,6 +1244,17 @@ fn handle_orders(
         let size = query_param(uri, "size").and_then(|s| s.parse::<usize>().ok());
         let page = query_param(uri, "page").and_then(|s| s.parse::<usize>().ok());
         opts.trades_asked.lock().unwrap().push((page, size));
+        // The live broker (09.11.2026) wants both bounds as `yyyy-MM-dd'T'HH:mm:ss.SSSX`: milliseconds and an offset.
+        let asked: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        for field in ["startDateTime", "endDateTime"] {
+            if !asked[field].as_str().is_some_and(is_bcs_datetime) {
+                return Some(json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({"type":"VALIDATION_ERROR","traceId":"mock","errors":[{"type":"INVALID_FORMAT","field":field,
+                        "payload":{"format":"yyyy-MM-dd'T'HH:mm:ss.SSSX"}}]}).to_string(),
+                ));
+            }
+        }
         let size = size.unwrap_or(50).clamp(1, 100);
         let page = page.unwrap_or(0);
         let mine: Vec<&MockTrade> = book.trades.iter().filter(|t| t.owner == owner).collect();
@@ -1224,7 +1314,7 @@ fn handle_orders(
                 StatusCode::OK,
                 &json!({"clientOrderId": id, "originalClientOrderId": book.orders[i].cid, "data": []}).to_string(),
             ),
-            Some(i) => json_response(StatusCode::OK, &book.orders[i].state_list(&id).to_string()),
+            Some(i) => json_response(StatusCode::OK, &book.orders[i].state_one(&id).to_string()),
             None => not_found(),
         });
     }
@@ -1316,7 +1406,11 @@ fn handle_orders(
         return Some(json_response(StatusCode::OK, &resp.to_string()));
     }
 
-    // Edit: the original is replaced, a new order appears under the new cid.
+    // Edit: the original is replaced, a new order appears under the new cid. The live broker refuses an
+    // edit without `orderType` (REQUIRED_FIELD, 05.11.2026), though the docs do not mark it required.
+    if parsed["orderType"].is_null() {
+        return Some(validation("orderType", "required"));
+    }
     if book
         .orders
         .iter()

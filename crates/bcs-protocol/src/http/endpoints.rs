@@ -232,7 +232,8 @@ impl BcsHttpClient {
     /// let found = client
     ///     .get_instruments_by_tickers(&InstrumentsByTickersRequest { tickers: vec!["SBER".into()] }, None, None)
     ///     .await?;
-    /// let params = found[0].trading_params_primary().expect("a primary board");
+    /// // One record per exchange: SBER comes as SPBRU and as TQBR, pick the board you trade on.
+    /// let params = found.iter().find_map(|i| i.trading_params_for_board("TQBR")).expect("TQBR");
     /// assert_eq!(params.class_code, "TQBR");
     /// # Ok(())
     /// # }
@@ -963,7 +964,7 @@ impl BcsHttpClient {
     /// # let cfg = brokapi_bcs_protocol::config::BcsConfig::for_mock("mock-refresh-token", &server.http_base).with_write(true);
     /// use brokapi_bcs_protocol::http::client::BcsHttpClient;
     /// use brokapi_bcs_protocol::http::models::{CreateOrderRequest, EditOrderRequest, OrderExtras};
-    /// use brokapi_bcs_protocol::models::enums::OrderSide;
+    /// use brokapi_bcs_protocol::models::enums::{OrderSide, OrderType};
     /// use uuid::Uuid;
     ///
     /// let client = BcsHttpClient::new(cfg)?;
@@ -978,7 +979,7 @@ impl BcsHttpClient {
     ///         order_id_type: Some("1".into()),
     ///         order_id: cid.to_string(),
     ///         client_order_id: new_cid,
-    ///         order_type: None,
+    ///         order_type: Some(OrderType::Limit), // the live broker refuses an edit without it
     ///         price: Some(dec!(301.0)),
     ///         order_quantity: 1,
     ///         extras: OrderExtras::default(),
@@ -1016,7 +1017,7 @@ impl BcsHttpClient {
     /// # let cfg = brokapi_bcs_protocol::config::BcsConfig::for_mock("mock-refresh-token", &server.http_base).with_write(true);
     /// use brokapi_bcs_protocol::http::client::BcsHttpClient;
     /// use brokapi_bcs_protocol::http::models::{CreateOrderRequest, EditOrderRequest, OrderExtras};
-    /// use brokapi_bcs_protocol::models::enums::OrderSide;
+    /// use brokapi_bcs_protocol::models::enums::{OrderSide, OrderType};
     /// use uuid::Uuid;
     ///
     /// let client = BcsHttpClient::new(cfg)?;
@@ -1030,7 +1031,7 @@ impl BcsHttpClient {
     ///         order_id_type: None, // default: the id is the clientOrderId of the original
     ///         order_id: cid.to_string(),
     ///         client_order_id: Uuid::new_v4(),
-    ///         order_type: None,
+    ///         order_type: Some(OrderType::Limit), // the live broker refuses an edit without it
     ///         price: Some(dec!(301.0)),
     ///         order_quantity: 2,
     ///         extras: OrderExtras::default(),

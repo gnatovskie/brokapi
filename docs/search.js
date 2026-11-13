@@ -15,7 +15,8 @@
   // book.js asks window.search.hasFocus() before it turns the pages with the arrow keys.
   window.search = { hasFocus: function () { return isOpen; } };
 
-  function base() { return new URL(path_to_root, window.location.href); }
+  // path_to_root is empty on the pages of the root of the book: then the base is the folder of the page, not the page itself.
+  function base() { return new URL(path_to_root || './', window.location.href); }
 
   function load() {
     if (loading) return loading;
@@ -168,6 +169,8 @@
   toggle.addEventListener('click', function () { if (isOpen) close(); else open(); });
 
   document.addEventListener('keydown', function (e) {
+    // Ctrl+K and Cmd+K open the window from anywhere, also from a field (as in the model of variant A).
+    if (!isOpen && (e.ctrlKey || e.metaKey) && !e.altKey && (e.key === 'k' || e.key === 'K' || e.key === 'л' || e.key === 'Л')) { e.preventDefault(); open(); return; }
     if (isOpen || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key !== '/' && e.key !== 's' && e.key !== 'S' && e.key !== 'ы' && e.key !== 'Ы') return;
     var t = e.target;

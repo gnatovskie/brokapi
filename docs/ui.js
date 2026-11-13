@@ -287,7 +287,7 @@
     var heads = Array.prototype.filter.call(main.querySelectorAll('h2, h3'), function (h) { return h.id; });
     if (heads.length < 2) return;
     var title = document.createElement('b');
-    title.textContent = 'На этой странице';
+    title.textContent = 'На странице';
     aside.appendChild(title);
     var links = heads.map(function (h) {
       var a = document.createElement('a');
@@ -297,6 +297,11 @@
       aside.appendChild(a);
       return a;
     });
+    // Two links under the list, as in the model of variant A.
+    var help = document.createElement('div');
+    help.className = 'page-toc-help';
+    help.innerHTML = '<a href="' + path_to_root + 'errors.html">Ошибки и что с ними делать</a><a href="https://brokapi.ru/#help">Помощь с внедрением</a>';
+    aside.appendChild(help);
     aside.hidden = false;
     document.documentElement.classList.add('has-page-toc');
     var ticking = false;
@@ -377,8 +382,92 @@
     });
   }
 
+
+  // ---- the sidebar as in the model of variant A -----------------------------------------------------------------------
+  // The sidebar is made by toc.js after the page is loaded, so these parts wait for it. 1) The first chapter ("Что это") has no
+  // part above it: it gets the label "Обзор" (the CSS numbers the parts, this one is 00). 2) The breadcrumbs over the title:
+  // Документация / part / chapters / the page. 3) The theme button switches at once between dark and light (no popup).
+  function whenSidebar(cb) {
+    var box = document.getElementById('mdbook-sidebar');
+    if (!box) return;
+    function ready() { return box.querySelector('.chapter a.active'); }
+    if (ready()) { cb(); return; }
+    var done = false;
+    var mo = new MutationObserver(function () { if (!done && ready()) { done = true; mo.disconnect(); cb(); } });
+    mo.observe(box, { childList: true, subtree: true });
+    setTimeout(function () { mo.disconnect(); if (!done && box.querySelector('.chapter')) { done = true; cb(); } }, 3000);
+  }
+
+  function overview() {
+    whenSidebar(function () {
+      var list = document.querySelector('#mdbook-sidebar ol.chapter');
+      if (!list || list.querySelector('li.overview')) return;
+      var first = list.firstElementChild;
+      if (!first || first.classList.contains('part-title')) return;
+      var li = document.createElement('li');
+      li.className = 'part-title overview';
+      li.textContent = 'Обзор';
+      list.insertBefore(li, first);
+    });
+  }
+
+  function crumbs() {
+    var main = document.getElementById('main-content');
+    var host = main && main.parentElement;
+    if (!host || document.querySelector('.crumbs')) return;
+    whenSidebar(function () {
+      var a = document.querySelector('#mdbook-sidebar .chapter a.active');
+      if (!a) return;
+      var trail = [];
+      var li = a.closest('li');
+      while (li) {
+        var link = li.querySelector(':scope > .chapter-link-wrapper > a, :scope > a');
+        trail.unshift({ text: link ? link.textContent.trim() : '', href: link ? link.getAttribute('href') : null, current: li.contains(a) && link === a });
+        var up = li.parentElement && li.parentElement.closest('li');
+        li = up;
+      }
+      var top = a.closest('ol.chapter > li');
+      var part = 'Обзор', prev = top && top.previousElementSibling;
+      while (prev) { if (prev.classList.contains('part-title')) { part = prev.textContent.trim(); break; } prev = prev.previousElementSibling; }
+      var nav = document.createElement('nav');
+      nav.className = 'crumbs';
+      nav.setAttribute('aria-label', 'Путь');
+      var ol = document.createElement('ol');
+      function add(text, href, current) {
+        var item = document.createElement('li');
+        if (href && !current) { var l = document.createElement('a'); l.href = href; l.textContent = text; item.appendChild(l); }
+        else { var sp = document.createElement('span'); sp.textContent = text; item.appendChild(sp); }
+        if (current) item.setAttribute('aria-current', 'page');
+        ol.appendChild(item);
+      }
+      add('Документация', path_to_root + 'index.html', false);
+      add(part, null, false);
+      trail.forEach(function (t, i) { add(t.text, t.href && path_to_root + t.href.replace(/^\.\//, ''), i === trail.length - 1); });
+      nav.appendChild(ol);
+      host.insertBefore(nav, main);
+    });
+  }
+
+  function themeToggle() {
+    var btn = document.getElementById('mdbook-theme-toggle');
+    if (!btn) return;
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      var html = document.documentElement;
+      var from = html.classList.contains('light') ? 'light' : 'coal';
+      var to = from === 'light' ? 'coal' : 'light';
+      // mdBook also switches syntax stylesheets and tracks the previous theme. Changing
+      // only the html class leaves dark highlighting behind on a light page (and vice versa).
+      document.getElementById('mdbook-theme-' + to).click();
+      btn.setAttribute('aria-pressed', to === 'coal' ? 'true' : 'false');
+      // The diagrams take their colors at load: draw them again in the colors of the new theme.
+      if (document.querySelector('pre.mermaid')) location.reload();
+    }, true);
+  }
+
   function init() {
-    var steps = [tables, fold, copyButtons, menuButton, report, watchScroll, pageToc, stripAxis, pagerParts, tabStart];
+    var steps = [tables, fold, copyButtons, menuButton, report, watchScroll, pageToc, stripAxis, pagerParts, tabStart, overview, crumbs, themeToggle];
     steps.forEach(function (step) {
       try { step(); } catch (e) { /* one part failing must not stop the others */ }
     });

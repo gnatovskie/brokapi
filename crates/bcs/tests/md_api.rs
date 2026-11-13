@@ -238,6 +238,39 @@ async fn directory_lookups_by_ticker_isin_and_kind() {
 }
 
 #[tokio::test]
+async fn a_secondary_board_of_one_record_is_found_by_get_and_trading_params() {
+    // The MOEX record of SBER lists TQBR (primary) and SMAL. Asked for SMAL, both calls answer
+    // for SMAL: the card is not the primary board's and is not missing.
+    let server = MockServer::start(Arc::default()).await;
+    let (md, _rx) = md(&server).await;
+    let smal = InstrumentId::new(
+        InstrumentKey::new("SBER", "SMAL"),
+        NativeId::TickerClass {
+            ticker: "SBER".into(),
+            class_code: "SMAL".into(),
+        },
+    );
+    let card = md.get(&smal).await.expect("card of SMAL");
+    assert_eq!(
+        (card.id.key.display().as_str(), card.exchange.as_str()),
+        ("SBER@SMAL", "MOEX")
+    );
+    let params = md.trading_params(&smal).await.expect("params of SMAL");
+    assert!(params.lot_size > Qty::new(dec!(0.0)));
+    // A board no record lists is still not found.
+    let none = InstrumentId::new(
+        InstrumentKey::new("SBER", "TQTF"),
+        NativeId::TickerClass {
+            ticker: "SBER".into(),
+            class_code: "TQTF".into(),
+        },
+    );
+    assert!(md.get(&none).await.is_err());
+    assert!(md.trading_params(&none).await.is_err());
+    md.shutdown(ShutdownMode::Immediate).await;
+}
+
+#[tokio::test]
 async fn market_trades_quotes_and_candles_stream_with_our_subscription_ids() {
     let server = MockServer::start(Arc::default()).await;
     let (md, mut rx) = md(&server).await;

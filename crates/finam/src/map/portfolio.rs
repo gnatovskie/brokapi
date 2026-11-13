@@ -9,9 +9,12 @@ use brokapi_finam_protocol::pb::grpc::tradeapi::v1::accounts::GetAccountResponse
 use crate::map::order::side_from_pb;
 use crate::util::{dec0, instrument_from_symbol, money, price, price0, qty0, timestamps};
 
+/// The holdings. A row with quantity 0 is no holding: Finam keeps an instrument bought and sold during
+/// the day in `positions` with quantity 0 (seen live 10.11.2026). Bybit and ALOR drop such rows too.
 fn positions(resp: &GetAccountResponse, now: Instant) -> Vec<Position> {
     resp.positions
         .iter()
+        .filter(|p| !qty0(&p.quantity).decimal().is_zero())
         .map(|p| Position {
             instrument: instrument_from_symbol(&p.symbol),
             // Signed: long positive, short negative.
@@ -42,7 +45,7 @@ fn balances(resp: &GetAccountResponse, now: Instant) -> Vec<Balance> {
 }
 
 /// `GetAccount` answer -> portfolio: one balance per currency of `cash` and one position per
-/// holding. Quantity is signed: a short position is negative. `average_price` is `None` when
+/// holding (rows with quantity 0 are dropped). Quantity is signed: a short position is negative. `average_price` is `None` when
 /// Finam does not send it (futures positions).
 pub fn map_account(resp: &GetAccountResponse, now: Instant) -> Portfolio {
     Portfolio {
@@ -65,7 +68,8 @@ pub fn map_trade(
         side: side_from_pb(t.side),
         price: price0(&t.price),
         qty: qty0(&t.size),
-        // Only historical trades carry a commission; its currency is not part of `Execution`.
+        // The stream has no commission, and on a live account the history had none either (the API
+        // description promises it there): 0 then, as the type says. Its currency is not part of `Execution`.
         commission: t
             .commission
             .as_ref()

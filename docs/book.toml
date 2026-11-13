@@ -9,9 +9,10 @@ build-dir = "book"
 create-missing = false
 
 [output.html]
+no-section-label = true
 # Вид brokapi, вариант "Спецификация" (как сайт brokapi.ru): белая страница и синий акцент, светлая "light" по умолчанию, темная "coal"
 # как вариант. Файлы лежат в theme/
-default-theme = "light"
+default-theme = "coal"
 preferred-dark-theme = "coal"
 additional-css = ["theme/brokapi.css"]
 # Книга живет в подкаталоге https://brokapi.ru/docs/: от этого адреса строятся 404.html и поиск, остальные ссылки относительные
@@ -23,9 +24,9 @@ site-url = "/docs/"
 # длинный код, кнопка копирования, search.js - окно поиска (Pagefind).
 additional-js = ["mermaid.min.js", "mermaid-init.js", "lang-tabs.js", "ui.js", "search.js"]
 
-# Разделы сайдбара сворачиваются: раскрыт только тот, где открытая страница, остальные - одна строка со стрелкой.
+# Вариант A (12.11.2026): все разделы меню раскрыты, как в макете. Номера глав скрыты, номера частей рисует CSS.
 [output.html.fold]
-enable = true
+enable = false
 level = 0
 
 # Встроенный поиск mdBook (elasticlunr) выключен: он режет все не-ASCII буквы, и по-русски ничего не находил. Поиск делает

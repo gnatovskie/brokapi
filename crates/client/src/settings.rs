@@ -106,7 +106,8 @@ impl Settings {
         Ok(cfg)
     }
 
-    /// The ALOR connector configuration: `refresh_token`, `portfolio`, `exchange`, `test`, `endpoint`.
+    /// The ALOR connector configuration: `refresh_token`, `portfolio`, `exchange`, `test`, `endpoint`,
+    /// `allow_margin` (or `ALOR_ALLOW_MARGIN`, disabled by default).
     pub fn alor(&self) -> Result<AlorConfig, Error> {
         let token = self
             .text("refresh_token", "ALOR_REFRESH_TOKEN")
@@ -129,6 +130,7 @@ impl Settings {
         if let Some(exchange) = self.text("exchange", "ALOR_EXCHANGE") {
             cfg = cfg.with_exchange(exchange);
         }
+        cfg.allow_margin = self.flag("allow_margin", "ALOR_ALLOW_MARGIN");
         if let Some(t) = self.request_timeout()? {
             cfg.request_timeout = t;
         }
@@ -234,6 +236,16 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn alor_margin_consent_is_explicit_and_reaches_the_connector() {
+        for enabled in [false, true] {
+            let settings = super::Settings::parse(&format!(
+                r#"{{"refresh_token":"mock-token","allow_margin":{enabled}}}"#
+            ))
+            .unwrap();
+            assert_eq!(settings.alor().unwrap().allow_margin, enabled);
+        }
+    }
     use super::*;
 
     const PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";

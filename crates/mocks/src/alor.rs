@@ -559,6 +559,15 @@ fn param<'a>(q: &'a [(String, String)], key: &str) -> Option<&'a str> {
     q.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
 }
 
+/// The refusal of the broker to a client with the initial risk level whose order on the derivatives market
+/// (the mock has one future, `SiZ6`) lacks `allowMargin: true` (seen live on 2026-11-13, `GAZR-12.26`).
+fn margin_consent_missing(order: &Value) -> Option<&'static str> {
+    let derivative = order["instrument"]["symbol"].as_str() == Some("SiZ6");
+    (derivative && order["allowMargin"].as_bool() != Some(true)).then_some(
+        "LowRiskMarginalForbidden: Нет подтверждения согласия с тем, что данная сделка может привести к открытию непокрытой позиции",
+    )
+}
+
 /// The security info of an instrument of the mock, or `None` for an unknown one.
 fn security(symbol: &str, board: Option<&str>) -> Option<Value> {
     if symbol == UNKNOWN_TICKER {
@@ -1052,6 +1061,9 @@ fn handle_command(
                 return err(400, "X-REQID is required");
             }
             let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            if let Some(refusal) = margin_consent_missing(&v) {
+                return err(400, refusal);
+            }
             let price = dec_of(&v["price"]);
             if *kind == "limit" && price == Some(brokapi_conformance::REJECT_PRICE.decimal()) {
                 return err(400, "the price is refused by the mock");
@@ -1100,6 +1112,9 @@ fn handle_command(
                 return err(400, "X-REQID is required");
             }
             let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            if let Some(refusal) = margin_consent_missing(&v) {
+                return err(400, refusal);
+            }
             let Some(idx) = b
                 .orders
                 .iter()
@@ -1263,6 +1278,17 @@ async fn handle_ws(socket: WebSocket, state: MockState) {
                 if refuse.is_some_and(|r| text.contains(&r)) {
                     let _ = write
                         .send(status(400, "Bad request: no such instrument"))
+                        .await;
+                    continue;
+                }
+                // The broker refuses a deeper book without compression (seen live, 2026-11-11).
+                if opcode == "OrderBookGetAndSubscribe" && req["depth"].as_u64().unwrap_or(20) > 20
+                {
+                    let _ = write
+                        .send(status(
+                            400,
+                            "The orderbook subscription with the depth more than 20 is allowed only with enabled compression.",
+                        ))
                         .await;
                     continue;
                 }

@@ -70,6 +70,11 @@ pub struct AlorConfig {
     /// The exchange of the portfolio: `MOEX` (default) or `SPBX`. Orders, positions and trades are read per
     /// exchange, so one connector works with one.
     pub exchange: String,
+    /// The consent of the client with the initial risk level to orders that may open an uncovered position:
+    /// the connector writes `allowMargin: true` into every order it sends. Off by default, because it is the
+    /// owner's consent to the risk, not a technical switch. The broker needs it for every order of the
+    /// derivatives market (`LowRiskMarginalForbidden` without it). Set by `ALOR_ALLOW_MARGIN=1`.
+    pub allow_margin: bool,
 }
 
 impl std::fmt::Debug for AlorConfig {
@@ -83,6 +88,7 @@ impl std::fmt::Debug for AlorConfig {
             .field("ws_base_url", &self.ws_base_url)
             .field("portfolio", &self.portfolio)
             .field("exchange", &self.exchange)
+            .field("allow_margin", &self.allow_margin)
             .finish()
     }
 }
@@ -111,7 +117,16 @@ impl AlorConfig {
             ws_base_url: PROD_WS_BASE_URL.to_string(),
             portfolio: None,
             exchange: "MOEX".to_string(),
+            allow_margin: false,
         }
+    }
+
+    /// Gives (or takes back) the consent to orders that may open an uncovered position, see
+    /// [`AlorConfig::allow_margin`]. Returns the changed config.
+    #[must_use]
+    pub fn with_allow_margin(mut self, allow: bool) -> Self {
+        self.allow_margin = allow;
+        self
     }
 
     /// Reads the configuration from the environment (and from a `.env` file of the working directory, if
@@ -121,6 +136,7 @@ impl AlorConfig {
     /// * `ALOR_PORTFOLIO`: optional, see [`AlorConfig::portfolio`].
     /// * `ALOR_EXCHANGE`: optional, `MOEX` (default) or `SPBX`.
     /// * `ALOR_ENV`: optional, the exact text `test` selects the test contour.
+    /// * `ALOR_ALLOW_MARGIN`: optional, `1` or `true` gives the consent of [`AlorConfig::allow_margin`].
     ///
     /// No network call is made.
     ///
@@ -165,6 +181,8 @@ impl AlorConfig {
         {
             cfg.exchange = ex;
         }
+        cfg.allow_margin =
+            std::env::var("ALOR_ALLOW_MARGIN").is_ok_and(|v| v == "1" || v == "true");
         if std::env::var("ALOR_ENV").is_ok_and(|v| v == "test") {
             cfg = cfg.with_env(AlorEnv::Test);
         }

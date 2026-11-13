@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use brokapi_core::{ClientOrderId, Event, OrderState, SubscriptionId, UnixNanos};
+use brokapi_finam_protocol::pb::grpc::tradeapi::v1::AccountTrade;
 use brokapi_finam_protocol::pb::grpc::tradeapi::v1::accounts::GetAccountResponse;
 use brokapi_finam_protocol::pb::grpc::tradeapi::v1::orders as pb;
 use brokapi_runtime::{FinishedWindow, OrderRuntime};
@@ -22,6 +23,8 @@ use crate::map::portfolio::{map_account, map_trade};
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum UdEvent {
+    /// A command completed, or the driver's maintenance timer expired. Independent of a subscription.
+    Maintenance,
     /// A message of the order stream: current states of changed orders.
     Orders(pb::SubscribeOrdersResponse),
     /// A message of the own trades stream.
@@ -104,6 +107,9 @@ pub struct UdCore {
     done: FinishedWindow<ClientOrderId>,
     /// Cids forgotten since the last call of `take_forgotten`.
     forgotten: Vec<ClientOrderId>,
+    /// Fills of the trades stream held back because they may belong to a place of ours that has no
+    /// answer yet (see [`UdCore::holds_fills`]), with the subscription they came on.
+    early: Vec<(SubscriptionId, AccountTrade)>,
 }
 
 impl UdCore {
@@ -118,6 +124,7 @@ impl UdCore {
             index,
             done: FinishedWindow::new(),
             forgotten: Vec::new(),
+            early: Vec::new(),
         }
     }
 
@@ -150,11 +157,45 @@ impl UdCore {
         self.status.remove(&sub);
         self.seen_open.remove(&sub);
         self.down_since.remove(&sub);
+        self.early.retain(|(s, _)| *s != sub);
     }
 
     /// Stream status of subscription `sub`. `None` for an id the core does not know.
     pub fn status(&self, sub: SubscriptionId) -> Option<SubStatus> {
         self.status.get(&sub).cloned()
+    }
+
+    /// Whether a fill whose order is not known yet is held back instead of going out without a cid.
+    ///
+    /// The trades stream carries no comment, so the cid of a fill comes only from its order id, and that
+    /// is known after the answer to `place` or the first echo on the order stream. A market order can fill
+    /// before both (seen live on 10.11.2026). So while a place of ours waits for its answer, such a fill
+    /// is held, and it goes out after the next frame that names its order or when nothing of ours is in
+    /// flight any more. Only with an order stream open: that stream is what brings the order id soon.
+    /// Without it fills go out at once, and an early fill of ours carries no cid (match it by
+    /// `broker_order_id`, as with a fill from history).
+    fn holds_fills(&self) -> bool {
+        self.orders.in_flight_count() > 0 && self.subs.values().any(|k| *k == UdSubKind::Orders)
+    }
+
+    /// Sends out the held fills that can go now: their order became known, or nothing is in flight.
+    fn release_early(&mut self, now: Instant, out: &mut EventSink) {
+        if self.early.is_empty() {
+            return;
+        }
+        let holds = self.holds_fills();
+        let index = Arc::clone(&self.index);
+        self.early.retain(|(sub, t)| {
+            let cid = index.lookup(&t.order_id, &t.comment);
+            if cid.is_none() && holds {
+                return true;
+            }
+            out.push(CoreEvent {
+                sub: Some(*sub),
+                payload: Event::Execution(map_trade(t, cid, now)),
+            });
+            false
+        });
     }
 
     fn order_signal(state: &OrderState) -> Option<OrderSignal> {
@@ -206,6 +247,10 @@ impl BrokerCore for UdCore {
 
     fn on_frame(&mut self, frame: UdFrame, now: Instant, out: &mut EventSink) {
         let UdFrame { sub, event } = frame;
+        if matches!(event, UdEvent::Maintenance) {
+            self.on_timeout(now, out);
+            return;
+        }
         let Some(kind) = self.subs.get(&sub).copied() else {
             return;
         };
@@ -261,6 +306,10 @@ impl BrokerCore for UdCore {
                 self.status.insert(sub, SubStatus::Active);
                 for t in &msg.trades {
                     let cid = self.index.lookup(&t.order_id, &t.comment);
+                    if cid.is_none() && self.holds_fills() {
+                        self.early.push((sub, t.clone()));
+                        continue;
+                    }
                     out.push(CoreEvent {
                         sub: Some(sub),
                         payload: Event::Execution(map_trade(t, cid, now)),
@@ -277,6 +326,7 @@ impl BrokerCore for UdCore {
             // A message that does not match its subscription kind cannot happen.
             _ => {}
         }
+        self.release_early(now, out);
     }
 
     fn poll_transmit(&mut self) -> Option<Outbound> {
@@ -287,7 +337,10 @@ impl BrokerCore for UdCore {
         None
     }
 
-    fn on_timeout(&mut self, _now: Instant, _out: &mut EventSink) {}
+    fn on_timeout(&mut self, now: Instant, out: &mut EventSink) {
+        self.orders.sweep_timeouts(now);
+        self.release_early(now, out);
+    }
 
     /// Order-state and portfolio subscriptions. Executions are registered with `register`
     /// because `SubscriptionKind` has no variant for them.

@@ -19,6 +19,21 @@ fn dec_out_opt<S: serde::Serializer>(d: &Option<Decimal>, s: S) -> Result<S::Ok,
     rust_decimal::serde::arbitrary_precision_option::serialize(d, s)
 }
 
+/// Reads an identifier that the broker writes as a string or, in some replies, as a number (`"orderno":0` in
+/// the market trades): both become the same text. `null` stays `None`.
+fn id_text<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        Text(String),
+        Number(serde_json::Number),
+    }
+    Ok(Option::<Id>::deserialize(d)?.map(|id| match id {
+        Id::Text(t) => t,
+        Id::Number(n) => n.to_string(),
+    }))
+}
+
 // ─── reference data ───────────────────────────────────────────────────────────
 
 /// An instrument: the answer of `GET /md/v2/Securities/{exchange}/{symbol}` and an item of the list
@@ -168,7 +183,7 @@ pub struct MarketTradeRecord {
     #[serde(default)]
     pub id: Option<i64>,
     /// The number of the order of the trade.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "id_text")]
     pub orderno: Option<String>,
     /// The ticker.
     #[serde(default)]
@@ -377,7 +392,7 @@ pub struct TradeRecord {
     #[serde(default)]
     pub id: String,
     /// The number of the order.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "id_text")]
     pub orderno: Option<String>,
     /// The comment of the order (the connector keeps the client order id here).
     #[serde(default)]

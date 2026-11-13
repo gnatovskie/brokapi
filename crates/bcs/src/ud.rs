@@ -9,7 +9,7 @@ use brokapi_bcs_protocol::error::BcsApiError;
 use brokapi_bcs_protocol::http::client::BcsHttpClient;
 use brokapi_bcs_protocol::http::models::{
     CancelByIdRequest, CreateOrderRequest, EditOrderRequest, OrderRecord, OrderSearchRequest,
-    OrderStateListResponse, TradeSearchRequest,
+    OrderStateListResponse, OrderType as BcsOrderType, TradeSearchRequest,
 };
 use brokapi_bcs_protocol::models::enums::OrderSide as BcsOrderSide;
 use brokapi_bcs_protocol::ws::client::BcsWsClient;
@@ -50,7 +50,7 @@ use crate::map::whole_pieces;
 use crate::pump::{drain_backlog, run_ud_pump};
 use crate::raw::BcsRaw;
 use crate::subs::{SubIdGen, UdSubKind, UdSubscription};
-use crate::util::{class_code, nanos_to_datetime, ticker};
+use crate::util::{class_code, ticker, trade_search_time};
 
 struct UdShared {
     http: BcsHttpClient,
@@ -896,7 +896,13 @@ impl OrderExecutor for UserDataConnector {
             order_id_type: Some("1".into()),
             order_id: req.original_cid.hyphenated().to_string(),
             client_order_id: req.cid,
-            order_type: None,
+            // The live broker refuses an edit without it (REQUIRED_FIELD, 05.11.2026). An order with a price
+            // is a limit order, the one edit that makes sense.
+            order_type: Some(if price.is_some() {
+                BcsOrderType::Limit
+            } else {
+                BcsOrderType::Market
+            }),
             price,
             order_quantity: qty,
             extras: Default::default(),
@@ -1050,8 +1056,8 @@ impl ExecutionSource for UserDataConnector {
     /// as for any read.
     async fn executions(&self, range: TimeRange) -> Result<Vec<Execution>, Error> {
         let req = TradeSearchRequest {
-            start_date_time: nanos_to_datetime(range.from).to_rfc3339(),
-            end_date_time: nanos_to_datetime(range.to).to_rfc3339(),
+            start_date_time: trade_search_time(range.from),
+            end_date_time: trade_search_time(range.to),
             side: None,
             tickers: None,
         };

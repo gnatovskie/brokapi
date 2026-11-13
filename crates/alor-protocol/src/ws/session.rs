@@ -12,7 +12,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Mutex;
 use tokio::time::{self, sleep};
 use tokio_tungstenite::WebSocketStream;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, info, warn};
 
@@ -120,13 +119,16 @@ impl WsSession {
         options: WsOptions,
     ) -> Self {
         Self::spawn_using(http, event_tx, options, |url: String| async move {
-            connect_async(url.as_str()).await.map(|(stream, response)| {
-                info!(
-                    "WebSocket connected to {url} with status <{}>",
-                    response.status()
-                );
-                stream
-            })
+            crate::ws::connect::connect(url.as_str())
+                .await
+                .map_err(|e| *e)
+                .map(|(stream, response)| {
+                    info!(
+                        "WebSocket connected to {url} with status <{}>",
+                        response.status()
+                    );
+                    stream
+                })
         })
     }
 

@@ -1,35 +1,97 @@
-/* API reference (rustdoc) in the design "Specification": white page, ink-blue text, blue links, Plex Sans and Plex Mono, code blocks
-   dark in both themes. The same tokens as the book (theme/brokapi.css).
-   Connected by docs/build.sh: --default-theme=light and --extend-css. The fonts are copied by build.sh into api/fonts/
-   (the book's own copies have hashed names). The font paths are relative to the css file (rustdoc writes it as api/theme.css, so fonts/ is next to it). */
-@font-face { font-family: 'IBM Plex Sans'; font-weight: 400 700; font-display: swap;
-  src: url('fonts/ibm-plex-sans-cyrillic-wght-normal.woff2') format('woff2-variations');
-  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
-@font-face { font-family: 'IBM Plex Sans'; font-weight: 400 700; font-display: swap;
-  src: url('fonts/ibm-plex-sans-latin-wght-normal.woff2') format('woff2-variations');
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
-@font-face { font-family: 'IBM Plex Mono'; font-weight: 400; font-display: swap;
-  src: url('fonts/ibm-plex-mono-cyrillic-400-normal.woff2') format('woff2');
-  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
-@font-face { font-family: 'IBM Plex Mono'; font-weight: 400; font-display: swap;
-  src: url('fonts/ibm-plex-mono-latin-400-normal.woff2') format('woff2');
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
-@font-face { font-family: 'IBM Plex Mono'; font-weight: 500; font-display: swap;
-  src: url('fonts/ibm-plex-mono-cyrillic-500-normal.woff2') format('woff2');
-  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
-@font-face { font-family: 'IBM Plex Mono'; font-weight: 500; font-display: swap;
-  src: url('fonts/ibm-plex-mono-latin-500-normal.woff2') format('woff2');
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
-@font-face { font-family: 'IBM Plex Mono'; font-weight: 600; font-display: swap;
-  src: url('fonts/ibm-plex-mono-cyrillic-600-normal.woff2') format('woff2');
-  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
-@font-face { font-family: 'IBM Plex Mono'; font-weight: 600; font-display: swap;
-  src: url('fonts/ibm-plex-mono-latin-600-normal.woff2') format('woff2');
-  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+/* API reference: Geist fonts and the same palette as the book. */
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/geist-cyrillic-400-normal.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/geist-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2190-21FF, U+2212, U+2215;
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('fonts/geist-cyrillic-500-normal.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('fonts/geist-latin-500-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2190-21FF, U+2212, U+2215;
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/geist-cyrillic-600-normal.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: 'Geist';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('fonts/geist-latin-600-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2190-21FF, U+2212, U+2215;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/geist-mono-cyrillic-400-normal.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('fonts/geist-mono-latin-400-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2190-21FF, U+2212, U+2215;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('fonts/geist-mono-cyrillic-500-normal.woff2') format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('fonts/geist-mono-latin-500-normal.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+20AC, U+2122, U+2190-21FF, U+2212, U+2215;
+}
 
 :root {
-  --font-family: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --font-family-code: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  --font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-family-code: 'Geist Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
 }
 body, .docblock, .docblock-short, .item-table, .sidebar, .search-results, h1, h2, h3, h4 {
   font-family: var(--font-family);
@@ -40,7 +102,7 @@ h1, h2, h3, h4, h5 { font-weight: 600; }
 
 /* Code blocks: dark with light text in both themes */
 :root[data-theme="light"], :root[data-theme="dark"] {
-  --code-block-background-color: #0b1220;
+  --code-block-background-color: #0d0f12;
   --code-highlight-kw-color: #8fa8ff;
   --code-highlight-kw-2-color: #8fa8ff;
   --code-highlight-lifetime-color: #f0c987;
@@ -53,80 +115,80 @@ h1, h2, h3, h4, h5 { font-weight: 600; }
   --code-highlight-self-color: #8fa8ff;
   --code-highlight-macro-color: #c6cffd;
   --code-highlight-question-mark-color: #8fa8ff;
-  --code-highlight-comment-color: #93a0b4;
-  --code-highlight-doc-comment-color: #93a0b4;
+  --code-highlight-comment-color: #a1a8b2;
+  --code-highlight-doc-comment-color: #a1a8b2;
 }
-pre, .docblock pre, .rustdoc .example-wrap pre { color: #e7ecf3; border-radius: 2px; }
+pre, .docblock pre, .rustdoc .example-wrap pre { color: #eceef1; border-radius: 2px; }
 .docblock :not(pre) > code, .item-table :not(pre) > code, .docblock-short code {
-  background: var(--inline-code-background, #f2f4f7); color: var(--inline-code-color, #0b1220); border-radius: 2px;
+  background: var(--inline-code-background, #f3f4f5); color: var(--inline-code-color, #0d0f12); border-radius: 2px;
 }
 .docblock a:not(.src):not(.scrape-help):not(.tooltip) { text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1px; }
 
 :root[data-theme="light"] {
-  --main-background-color: #ffffff;
-  --main-color: #0b1220;
-  --inline-code-background: #f2f4f7;
-  --inline-code-color: #0b1220;
-  --settings-input-color: #1f3fe0;
+  --main-background-color: #fbfbfa;
+  --main-color: #0d0f12;
+  --inline-code-background: #f3f4f5;
+  --inline-code-color: #0d0f12;
+  --settings-input-color: #2d4ee0;
   --settings-input-border-color: #8a94a3;
-  --settings-button-color: #0b1220;
-  --settings-button-border-focus: #1f3fe0;
-  --sidebar-background-color: #ffffff;
-  --sidebar-background-color-hover: #f2f4f7;
-  --scrollbar-track-background-color: #ffffff;
-  --scrollbar-thumb-background-color: #cdd3db;
-  --scrollbar-color: #cdd3db #ffffff;
-  --headings-border-bottom-color: #cdd3db;
-  --border-color: #cdd3db;
-  --button-background-color: #ffffff;
-  --right-side-color: #566170;
-  --link-color: #1f3fe0;
+  --settings-button-color: #0d0f12;
+  --settings-button-border-focus: #2d4ee0;
+  --sidebar-background-color: #fbfbfa;
+  --sidebar-background-color-hover: #f3f4f5;
+  --scrollbar-track-background-color: #fbfbfa;
+  --scrollbar-thumb-background-color: #d3d7dc;
+  --scrollbar-color: #d3d7dc #fbfbfa;
+  --headings-border-bottom-color: #d3d7dc;
+  --border-color: #d3d7dc;
+  --button-background-color: #fbfbfa;
+  --right-side-color: #4a515b;
+  --link-color: #2d4ee0;
   --sidebar-link-color: #3a4556;
-  --sidebar-current-link-background-color: #f2f4f7;
-  --type-link-color: #1f3fe0;
-  --mod-link-color: #1f3fe0;
-  --trait-link-color: #1f3fe0;
-  --struct-link-color: #1f3fe0;
-  --enum-link-color: #1f3fe0;
-  --union-link-color: #1f3fe0;
-  --fn-link-color: #1f3fe0;
-  --macro-link-color: #1f3fe0;
-  --attr-link-color: #1f3fe0;
-  --keyword-link-color: #1f3fe0;
-  --primitive-link-color: #1f3fe0;
-  --constant-link-color: #1f3fe0;
-  --assoc-item-link-color: #1f3fe0;
-  --search-color: #0b1220;
-  --search-input-focused-border-color: #1f3fe0;
-  --search-result-link-focus-background-color: #f2f4f7;
+  --sidebar-current-link-background-color: #f3f4f5;
+  --type-link-color: #2d4ee0;
+  --mod-link-color: #2d4ee0;
+  --trait-link-color: #2d4ee0;
+  --struct-link-color: #2d4ee0;
+  --enum-link-color: #2d4ee0;
+  --union-link-color: #2d4ee0;
+  --fn-link-color: #2d4ee0;
+  --macro-link-color: #2d4ee0;
+  --attr-link-color: #2d4ee0;
+  --keyword-link-color: #2d4ee0;
+  --primitive-link-color: #2d4ee0;
+  --constant-link-color: #2d4ee0;
+  --assoc-item-link-color: #2d4ee0;
+  --search-color: #0d0f12;
+  --search-input-focused-border-color: #2d4ee0;
+  --search-result-link-focus-background-color: #f3f4f5;
   --target-background-color: #dfe5ff;
-  --target-border-color: #1f3fe0;
-  --toggles-color: #566170;
-  --table-alt-row-background-color: #f2f4f7;
-  --src-line-numbers-span-color: #566170;
+  --target-border-color: #2d4ee0;
+  --toggles-color: #4a515b;
+  --table-alt-row-background-color: #f3f4f5;
+  --src-line-numbers-span-color: #4a515b;
 }
 :root[data-theme="dark"] {
-  --main-background-color: #0a0f1a;
-  --main-color: #e7ecf3;
-  --inline-code-background: #111826;
-  --inline-code-color: #e7ecf3;
+  --main-background-color: #0a0b0d;
+  --main-color: #eceef1;
+  --inline-code-background: #121418;
+  --inline-code-color: #eceef1;
   --code-block-background-color: #060a12;
   --settings-input-color: #8fa8ff;
   --settings-input-border-color: #667699;
-  --settings-button-color: #e7ecf3;
+  --settings-button-color: #eceef1;
   --settings-button-border-focus: #8fa8ff;
-  --sidebar-background-color: #0a0f1a;
-  --sidebar-background-color-hover: #141c2e;
-  --scrollbar-track-background-color: #0a0f1a;
-  --scrollbar-thumb-background-color: #243049;
-  --scrollbar-color: #243049 #0a0f1a;
-  --headings-border-bottom-color: #243049;
-  --border-color: #243049;
-  --button-background-color: #0e1523;
-  --right-side-color: #93a0b4;
+  --sidebar-background-color: #0a0b0d;
+  --sidebar-background-color-hover: #1a1d22;
+  --scrollbar-track-background-color: #0a0b0d;
+  --scrollbar-thumb-background-color: #2a2e35;
+  --scrollbar-color: #2a2e35 #0a0b0d;
+  --headings-border-bottom-color: #2a2e35;
+  --border-color: #2a2e35;
+  --button-background-color: #0e0f12;
+  --right-side-color: #a1a8b2;
   --link-color: #8fa8ff;
   --sidebar-link-color: #b9c3d3;
-  --sidebar-current-link-background-color: #141c2e;
+  --sidebar-current-link-background-color: #1a1d22;
   --type-link-color: #8fa8ff;
   --mod-link-color: #8fa8ff;
   --trait-link-color: #8fa8ff;
@@ -140,23 +202,23 @@ pre, .docblock pre, .rustdoc .example-wrap pre { color: #e7ecf3; border-radius: 
   --primitive-link-color: #8fa8ff;
   --constant-link-color: #8fa8ff;
   --assoc-item-link-color: #8fa8ff;
-  --search-color: #f3f6fb;
+  --search-color: #eceef1;
   --search-input-focused-border-color: #8fa8ff;
-  --search-result-link-focus-background-color: #141c2e;
+  --search-result-link-focus-background-color: #1a1d22;
   --target-background-color: #26346b;
   --target-border-color: #8fa8ff;
-  --toggles-color: #93a0b4;
-  --table-alt-row-background-color: #0e1523;
-  --src-line-numbers-span-color: #93a0b4;
+  --toggles-color: #a1a8b2;
+  --table-alt-row-background-color: #0e0f12;
+  --src-line-numbers-span-color: #a1a8b2;
 }
-:root[data-theme="light"] a.src, :root[data-theme="light"] .main-heading h1 { color: #0b1220; }
-:root[data-theme="dark"] a.src, :root[data-theme="dark"] .main-heading h1 { color: #f3f6fb; }
+:root[data-theme="light"] a.src, :root[data-theme="light"] .main-heading h1 { color: #0d0f12; }
+:root[data-theme="dark"] a.src, :root[data-theme="dark"] .main-heading h1 { color: #eceef1; }
 :root[data-theme="dark"] .logo-container img { filter: none; }
 .sidebar { border-right: 1px solid var(--border-color); }
 #copy-path { color: var(--right-side-color); }
 /* Links inside a dark code block (types in the declaration, links in examples): light, or they vanish on the dark block */
 pre a, pre a:visited, pre a[class] { color: #aebdff !important; text-decoration: none; }
-pre a:hover { color: #ffffff !important; text-decoration: underline; }
+pre a:hover { color: #fbfbfa !important; text-decoration: underline; }
 
 /* The bar of the book on top (reference/bar.html, given to rustdoc by docs/build.sh with --html-before-content): it is fixed,
    so the page and everything that sticks to the top of the window start under it. */

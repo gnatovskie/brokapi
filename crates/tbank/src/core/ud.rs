@@ -13,8 +13,8 @@ use std::time::Instant;
 
 use brokapi_core::{
     Balance, BrokerOrderId, ClientOrderId, Error, Event, InstrumentId, InstrumentKey, Money,
-    OrderSnapshot, OrderState, OrderType, PlaceOrderRequest, Price, Qty, Side, SubscriptionId,
-    Timestamps,
+    OrderSnapshot, OrderState, OrderType, PlaceOrderRequest, Portfolio, Price, Qty, Side,
+    SubscriptionId, Timestamps,
 };
 use brokapi_runtime::{FinishedWindow, OrderRuntime};
 use brokapi_sansio::{
@@ -136,6 +136,9 @@ pub struct UdCore {
     subs: HashMap<UdSubKind, SubscriptionId>,
     cash: BTreeMap<String, (Money, Money)>,
     portfolio_parts: (bool, bool),
+    /// A portfolio of `PortfolioStream` was delivered on the current portfolio subscription (the snapshot after
+    /// the subscribe is then not needed: the stream is newer).
+    portfolio_streamed: bool,
     updates: Vec<SubUpdate>,
     connections: HashMap<StreamKind, u32>,
     reconnected: VecDeque<StreamKind>,
@@ -157,6 +160,7 @@ impl UdCore {
             subs: HashMap::new(),
             cash: BTreeMap::new(),
             portfolio_parts: (false, false),
+            portfolio_streamed: false,
             updates: Vec::new(),
             connections: HashMap::new(),
             reconnected: VecDeque::new(),
@@ -226,6 +230,27 @@ impl UdCore {
     /// Forgets the subscription of `kind`, if any.
     pub fn remove_sub(&mut self, kind: UdSubKind) {
         self.subs.remove(&kind);
+        if kind == UdSubKind::Portfolio {
+            self.portfolio_streamed = false;
+        }
+    }
+
+    /// The portfolio as it is right after the portfolio subscription was confirmed, as the first event of it.
+    ///
+    /// Why: the portfolio stream of T-Bank sends nothing at subscribe (the sandbox, 14.11.2026), only after a
+    /// change of the account, so a bot that waits for its first event would wait for a change. The connector
+    /// reads the portfolio once (`GetPositions` and `GetPortfolio`) and hands it here. If the stream delivered a
+    /// portfolio while the read was on its way, that one is newer and the snapshot is dropped. The cash of the
+    /// snapshot is remembered like the cash of the streams, so the next event of the stream carries it.
+    pub fn portfolio_snapshot(&mut self, snap: Portfolio, out: &mut EventSink) {
+        if self.portfolio_streamed {
+            return;
+        }
+        let Some(sub) = self.sub(UdSubKind::Portfolio) else {
+            return;
+        };
+        self.set_cash(snap.balances.clone());
+        out.push_payload(Some(sub), Event::Portfolio(snap));
     }
 
     /// The id of the active subscription of `kind`, if any.
@@ -757,6 +782,7 @@ impl UdCore {
                     self.learn_parts(&pos.instrument_uid, &pos.figi, &pos.ticker, &pos.class_code);
                 }
                 let snap = portfolio::portfolio(&p, self.cash_balances(now), now);
+                self.portfolio_streamed = true;
                 out.push_payload(self.sub(UdSubKind::Portfolio), Event::Portfolio(snap));
             }
             Some(PortfolioPayload::Subscriptions(s)) => {

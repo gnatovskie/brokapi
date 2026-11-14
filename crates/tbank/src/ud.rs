@@ -1152,7 +1152,12 @@ impl UserDataConnector {
         }
         let outcome = tokio::time::timeout(inner.request_timeout, rx).await;
         let failure = match outcome {
-            Ok(Ok(Ok(()))) => return Ok(id),
+            Ok(Ok(Ok(()))) => {
+                if kind == UdSubKind::Portfolio {
+                    self.portfolio_snapshot().await;
+                }
+                return Ok(id);
+            }
             Ok(Ok(Err(reason))) => Error::Rejected {
                 code: reason,
                 message: "subscription refused".into(),
@@ -1177,6 +1182,16 @@ impl UserDataConnector {
             inner.stop_stream(*s);
         }
         Err(failure)
+    }
+
+    /// The first event of a portfolio subscription: the portfolio now. The stream of T-Bank says nothing at
+    /// subscribe, only after a change of the account. A failed read does not fail the subscription (the stream
+    /// still delivers the changes), it is logged and the first event comes with the first change.
+    async fn portfolio_snapshot(&self) {
+        match PortfolioSource::portfolio(self).await {
+            Ok(snap) => self.core(|c, out| c.portfolio_snapshot(snap, out)),
+            Err(e) => warn!(error = %e, "portfolio snapshot after subscribe failed"),
+        }
     }
 
     /// Runs `f` on the core and delivers the events it produced.

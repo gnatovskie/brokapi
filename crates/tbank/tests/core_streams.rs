@@ -506,3 +506,80 @@ fn a_cancel_that_the_broker_accepted_moves_the_order_on() {
         Some("Cancelled")
     );
 }
+
+fn snapshot(rub: &str) -> brokapi_core::Portfolio {
+    use brokapi_core::{Balance, Money, Portfolio, Timestamps, UnixNanos};
+    let now = Timestamps::new(UnixNanos::from_nanos(0), Instant::now());
+    Portfolio {
+        balances: vec![Balance {
+            currency: "RUB".into(),
+            available: rub.parse::<Money>().unwrap(),
+            blocked: Money::from(0),
+            ts: now,
+        }],
+        positions: vec![],
+        ts: now,
+    }
+}
+
+/// The portfolio stream of T-Bank says nothing at subscribe (sandbox, 14.11.2026): the connector reads the
+/// portfolio once and gives it to the core as the first event of the subscription.
+#[test]
+fn the_portfolio_snapshot_is_the_first_event_of_the_subscription() {
+    let mut core = core();
+    let mut out = EventSink::new();
+    core.portfolio_snapshot(snapshot("1000"), &mut out);
+    let events = out.drain();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].sub, Some(SubscriptionId::new(3)));
+    let Event::Portfolio(p) = &events[0].payload else {
+        panic!("{:?}", events[0].payload)
+    };
+    assert_eq!(p.balances[0].available, "1000".parse().unwrap());
+
+    // The cash of the snapshot is the cash the next portfolio of the stream carries.
+    let next = feed(
+        &mut core,
+        UdFrame::Portfolio(pb::PortfolioStreamResponse {
+            payload: Some(pb::portfolio_stream_response::Payload::Portfolio(
+                pb::PortfolioResponse {
+                    account_id: ACC.into(),
+                    ..Default::default()
+                },
+            )),
+        }),
+    );
+    let Event::Portfolio(p) = &next[0] else {
+        panic!("{next:?}")
+    };
+    assert_eq!(p.balances[0].available, "1000".parse().unwrap());
+}
+
+/// A portfolio of the stream that came while the snapshot was being read is newer: the snapshot is dropped, it
+/// must not overwrite it.
+#[test]
+fn a_snapshot_older_than_the_stream_is_dropped() {
+    let mut core = core();
+    let streamed = feed(
+        &mut core,
+        UdFrame::Portfolio(pb::PortfolioStreamResponse {
+            payload: Some(pb::portfolio_stream_response::Payload::Portfolio(
+                pb::PortfolioResponse {
+                    account_id: ACC.into(),
+                    ..Default::default()
+                },
+            )),
+        }),
+    );
+    assert_eq!(streamed.len(), 1);
+    let mut out = EventSink::new();
+    core.portfolio_snapshot(snapshot("1000"), &mut out);
+    assert!(out.drain().is_empty());
+
+    // A new subscription starts clean: its snapshot is delivered again.
+    core.remove_sub(UdSubKind::Portfolio);
+    core.add_sub(SubscriptionId::new(4), UdSubKind::Portfolio);
+    let mut out = EventSink::new();
+    core.portfolio_snapshot(snapshot("1000"), &mut out);
+    assert_eq!(out.drain().len(), 1);
+}

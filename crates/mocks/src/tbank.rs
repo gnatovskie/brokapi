@@ -1340,8 +1340,14 @@ impl OperationsStreamService for Mock {
                     payload: Some(P::Subscriptions(ack)),
                 }))
                 .await;
-            // The portfolio now, then again after every fill, until the client goes away.
+            // Like the live broker (sandbox, 14.11.2026): nothing after the acknowledgement, the portfolio comes
+            // after a change of the account (a fill, a pay in), until the client goes away.
+            changed.mark_unchanged();
             loop {
+                tokio::select! {
+                    _ = tx.closed() => return,
+                    moved = changed.changed() => if moved.is_err() { return },
+                }
                 changed.mark_unchanged();
                 let portfolio = state.portfolio_of(&account);
                 if tx
@@ -1352,10 +1358,6 @@ impl OperationsStreamService for Mock {
                     .is_err()
                 {
                     return;
-                }
-                tokio::select! {
-                    _ = tx.closed() => return,
-                    moved = changed.changed() => if moved.is_err() { return },
                 }
             }
         });

@@ -1,0 +1,184 @@
+{
+  "body": {
+    "asks": [
+      {
+        "price": {
+          "nano": 990000000,
+          "units": 299
+        },
+        "quantity": 2028
+      },
+      {
+        "price": {
+          "nano": 0,
+          "units": 300
+        },
+        "quantity": 603
+      },
+      {
+        "price": {
+          "nano": 10000000,
+          "units": 300
+        },
+        "quantity": 2720
+      },
+      {
+        "price": {
+          "nano": 20000000,
+          "units": 300
+        },
+        "quantity": 2249
+      },
+      {
+        "price": {
+          "nano": 30000000,
+          "units": 300
+        },
+        "quantity": 1568
+      },
+      {
+        "price": {
+          "nano": 40000000,
+          "units": 300
+        },
+        "quantity": 4027
+      },
+      {
+        "price": {
+          "nano": 50000000,
+          "units": 300
+        },
+        "quantity": 14788
+      },
+      {
+        "price": {
+          "nano": 60000000,
+          "units": 300
+        },
+        "quantity": 5614
+      },
+      {
+        "price": {
+          "nano": 70000000,
+          "units": 300
+        },
+        "quantity": 641
+      },
+      {
+        "price": {
+          "nano": 80000000,
+          "units": 300
+        },
+        "quantity": 607
+      }
+    ],
+    "bids": [
+      {
+        "price": {
+          "nano": 960000000,
+          "units": 299
+        },
+        "quantity": 797
+      },
+      {
+        "price": {
+          "nano": 950000000,
+          "units": 299
+        },
+        "quantity": 2408
+      },
+      {
+        "price": {
+          "nano": 940000000,
+          "units": 299
+        },
+        "quantity": 9397
+      },
+      {
+        "price": {
+          "nano": 930000000,
+          "units": 299
+        },
+        "quantity": 218
+      },
+      {
+        "price": {
+          "nano": 920000000,
+          "units": 299
+        },
+        "quantity": 3082
+      },
+      {
+        "price": {
+          "nano": 910000000,
+          "units": 299
+        },
+        "quantity": 12
+      },
+      {
+        "price": {
+          "nano": 900000000,
+          "units": 299
+        },
+        "quantity": 1933
+      },
+      {
+        "price": {
+          "nano": 890000000,
+          "units": 299
+        },
+        "quantity": 40
+      },
+      {
+        "price": {
+          "nano": 880000000,
+          "units": 299
+        },
+        "quantity": 4709
+      },
+      {
+        "price": {
+          "nano": 870000000,
+          "units": 299
+        },
+        "quantity": 13095
+      }
+    ],
+    "class_code": "TQBR",
+    "close_price": {
+      "nano": 730000000,
+      "units": 299
+    },
+    "close_price_ts": {
+      "nanos": 816230000,
+      "seconds": 1794603003
+    },
+    "depth": 10,
+    "figi": "<redacted>",
+    "instrument_uid": "<redacted>",
+    "last_price": {
+      "nano": 960000000,
+      "units": 299
+    },
+    "last_price_ts": {
+      "nanos": 382219000,
+      "seconds": 1794661957
+    },
+    "limit_down": {
+      "nano": 830000000,
+      "units": 290
+    },
+    "limit_up": {
+      "nano": 810000000,
+      "units": 308
+    },
+    "orderbook_ts": {
+      "nanos": 866066000,
+      "seconds": 1794661957
+    },
+    "ticker": "SBER"
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "order_book"
+}

@@ -1,0 +1,21 @@
+{
+  "body": {
+    "accounts": [
+      {
+        "access_level": "AccountAccessLevelFullAccess",
+        "closed_date": null,
+        "id": "<redacted>",
+        "name": "<redacted>",
+        "opened_date": {
+          "nanos": 250317000,
+          "seconds": 1794661957
+        },
+        "status": "Open",
+        "type": "Tinkoff"
+      }
+    ]
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "get_accounts"
+}

@@ -1,0 +1,79 @@
+{
+  "body": {
+    "instrument": {
+      "api_trade_available_flag": true,
+      "asset_uid": "<redacted>",
+      "blocked_tca_flag": false,
+      "brand": {
+        "logo_base_color": "#309c0b",
+        "logo_name": "sber3.png",
+        "text_color": "#ffffff"
+      },
+      "buy_available_flag": true,
+      "class_code": "TQBR",
+      "country_of_risk": "RU",
+      "country_of_risk_name": "Российская Федерация",
+      "currency": "rub",
+      "dlong": {
+        "nano": 166600000,
+        "units": 0
+      },
+      "dlong_client": {
+        "nano": 166600000,
+        "units": 0
+      },
+      "dlong_min": {
+        "nano": 125000000,
+        "units": 0
+      },
+      "dshort": {
+        "nano": 200000000,
+        "units": 0
+      },
+      "dshort_client": {
+        "nano": 200000000,
+        "units": 0
+      },
+      "dshort_min": {
+        "nano": 142800000,
+        "units": 0
+      },
+      "exchange": "moex_mrng_evng_e_wknd_dlr",
+      "figi": "<redacted>",
+      "first_1day_candle_date": {
+        "nanos": 0,
+        "seconds": 946969200
+      },
+      "first_1min_candle_date": {
+        "nanos": 0,
+        "seconds": 1520447580
+      },
+      "for_iis_flag": true,
+      "for_qual_investor_flag": false,
+      "instrument_kind": "Share",
+      "instrument_type": "share",
+      "isin": "<redacted>",
+      "klong": null,
+      "kshort": null,
+      "lot": 1,
+      "min_price_increment": {
+        "nano": 10000000,
+        "units": 0
+      },
+      "name": "Сбербанк",
+      "otc_flag": false,
+      "position_uid": "<redacted>",
+      "real_exchange": "Moex",
+      "required_tests": [],
+      "sell_available_flag": true,
+      "short_enabled_flag": true,
+      "ticker": "SBER",
+      "trading_status": "NormalTrading",
+      "uid": "<redacted>",
+      "weekend_flag": true
+    }
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "instrument_by_ticker"
+}

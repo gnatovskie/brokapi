@@ -1,0 +1,98 @@
+{
+  "body": {
+    "account_id": "<redacted>",
+    "daily_yield": null,
+    "daily_yield_relative": null,
+    "expected_yield": {
+      "nano": 0,
+      "units": 0
+    },
+    "positions": [
+      {
+        "average_position_price": {
+          "currency": "rub",
+          "nano": 0,
+          "units": 1
+        },
+        "average_position_price_fifo": null,
+        "average_position_price_pt": {
+          "nano": 0,
+          "units": 0
+        },
+        "blocked": false,
+        "blocked_lots": {
+          "nano": 0,
+          "units": 0
+        },
+        "class_code": "CETS",
+        "current_nkd": null,
+        "current_price": {
+          "currency": "rub",
+          "nano": 0,
+          "units": 1
+        },
+        "daily_yield": null,
+        "expected_yield": null,
+        "expected_yield_fifo": null,
+        "figi": "<redacted>",
+        "instrument_type": "currency",
+        "instrument_uid": "<redacted>",
+        "position_uid": "<redacted>",
+        "quantity": {
+          "nano": 0,
+          "units": 1000000
+        },
+        "quantity_lots": {
+          "nano": 0,
+          "units": 1000000
+        },
+        "ticker": "<redacted>",
+        "var_margin": null
+      }
+    ],
+    "total_amount_bonds": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "total_amount_currencies": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 1000000
+    },
+    "total_amount_etf": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "total_amount_futures": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "total_amount_options": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "total_amount_portfolio": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 1000000
+    },
+    "total_amount_shares": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "total_amount_sp": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "virtual_positions": []
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "portfolio"
+}

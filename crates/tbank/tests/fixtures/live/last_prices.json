@@ -1,0 +1,24 @@
+{
+  "body": {
+    "last_prices": [
+      {
+        "class_code": "TQBR",
+        "figi": "<redacted>",
+        "instrument_uid": "<redacted>",
+        "last_price_type": "LastPriceExchange",
+        "price": {
+          "nano": 960000000,
+          "units": 299
+        },
+        "ticker": "SBER",
+        "time": {
+          "nanos": 382219000,
+          "seconds": 1794661957
+        }
+      }
+    ]
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "last_prices"
+}

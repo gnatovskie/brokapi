@@ -1,0 +1,9 @@
+{
+  "body": {
+    "message": "30057"
+  },
+  "broker": "tbank",
+  "code": "InvalidArgument",
+  "outcome": "refused",
+  "probe": "repeat_second_post"
+}

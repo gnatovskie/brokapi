@@ -20,9 +20,10 @@ use std::time::Duration;
 use brokapi_conformance as conf;
 use brokapi_core::{
     ClientOrderId, Envelope, Event, InstrumentId, InstrumentKey, InstrumentQuery, InstrumentSource,
-    NativeId, OrderExecutor, OrderState, OrderType, PlaceOrderRequest, Price, Qty, ShutdownMode,
-    Side,
+    NativeId, OrderBook, OrderBookSource, OrderExecutor, OrderState, OrderType, PlaceOrderRequest,
+    Price, Qty, RoundMode, ShutdownMode, Side,
 };
+use brokapi_core::{Decimal, dec};
 use brokapi_runtime::BrokerLimiter;
 use brokapi_tbank::limits::default_limits;
 use brokapi_tbank::{MarketDataConfig, MarketDataConnector, UserDataConfig, UserDataConnector};
@@ -82,6 +83,20 @@ async fn find_sber(md: &MarketDataConnector) -> InstrumentId {
         .await
         .expect("find SBER");
     found.into_iter().next().expect("SBER on TQBR").id
+}
+
+/// A price below the market that T-Bank still accepts: 2% under the best bid, down to the step of
+/// 0.01 (SBER). A buy at 1 rub is refused with 30099, the price is outside the limits of the instrument
+/// (seen on the sandbox, 14.11.2026): the band is about 3% around the last price, so "far" means 2%.
+async fn far_price(md: &MarketDataConnector, id: &InstrumentId) -> Price {
+    let book = md.order_book(id, 1).await.expect("order book");
+    let OrderBook::Snapshot { bids, .. } = book else {
+        panic!("a snapshot of the book was asked for");
+    };
+    let bid = bids.first().expect("a best bid").price;
+    let low = Price::new(bid.decimal() * dec!(0.98));
+    low.round_to_step(Price::new(dec!(0.01)), RoundMode::Down)
+        .expect("round to the step")
 }
 
 fn limiter() -> Arc<BrokerLimiter> {
@@ -146,8 +161,9 @@ async fn trading_scenarios() {
         .await
         .expect("order state stream");
 
-    // far from the market: a buy at 1 rub rests in the book
-    conf::place_and_cancel(&ud, &sber, Price::from(1)).await;
+    // far from the market, inside the price band: the buy rests in the book
+    let far = far_price(&md, &sber).await;
+    conf::place_and_cancel(&ud, &sber, far).await;
 
     // Q1 (open question): what does the broker do with a repeated order_id (idempotency)?
     let cid = ClientOrderId::new_v4();
@@ -157,7 +173,7 @@ async fn trading_scenarios() {
         side: Side::Buy,
         order_type: OrderType::Limit,
         qty: Qty::from(1),
-        price: Some(Price::from(1)),
+        price: Some(far),
     };
     ud.place(req.clone()).await.expect("first place");
     println!(
@@ -243,8 +259,9 @@ async fn stop_order_scenarios() {
     .unwrap();
     conf::reconcile(&ud).await;
     assert!(ud.caps().supports_stop_orders);
-    // SELL stops at 1 rub are far below any market price and never trigger.
-    conf::stop_order_far_from_market(&ud, &sber, Price::from(1)).await;
+    // SELL stops far below the market (inside the price band) never trigger.
+    let far = far_price(&md, &sber).await;
+    conf::stop_order_far_from_market(&ud, &sber, far).await;
     close_account(&cfg, &account).await;
 }
 
@@ -288,7 +305,7 @@ const REFERENCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures
 
 /// Records the answers of the sandbox as reference files in `tests/fixtures/live`, cleaned: no token,
 /// no account or order numbers (`brokapi_mocks::live::scrub`). It opens its own sandbox account, reads,
-/// places ONE limit buy at 1 rub (far below the market) with its state and the cancel, and closes the account.
+/// places ONE limit buy 2% below the market (inside the price band) with its state and the cancel, and closes the account.
 ///
 /// After the run: look at the files (`git diff`), run `cargo test -p brokapi-tbank --test live_reference` and
 /// commit them. A difference reported there is a place where the imitation is wrong.
@@ -310,13 +327,14 @@ async fn record_reference() {
     let NativeId::Uid(uid) = &sber.native else {
         panic!("the directory gave no uid: {:?}", sber.native)
     };
+    let far = far_price(&md, &sber).await.to_string();
     md.shutdown(ShutdownMode::Immediate).await;
 
     let client = TbankClient::new(&cfg).unwrap();
     let recorder =
         Recorder::new("tbank", REFERENCE_DIR).with_secrets([cfg.token.clone(), account.clone()]);
     let mut answers = probes::read_only(&client, &account, uid, "SBER", "TQBR").await;
-    answers.extend(probes::order_roundtrip(&client, &account, uid, "1.0", 1).await);
+    answers.extend(probes::order_roundtrip(&client, &account, uid, &far, 1).await);
     close_account(&cfg, &account).await;
     for (name, outcome) in &answers {
         let path = recorder.record(name, outcome);
@@ -351,10 +369,11 @@ async fn repeated_order_id_in_sandbox() {
     let NativeId::Uid(uid) = &sber.native else {
         panic!("the directory gave no uid: {:?}", sber.native)
     };
+    let far = far_price(&md, &sber).await.to_string();
     md.shutdown(ShutdownMode::Immediate).await;
 
     let client = TbankClient::new(&cfg).unwrap();
-    let answers = probes::repeated_order_id(&client, &account, uid, "1.0", 1).await;
+    let answers = probes::repeated_order_id(&client, &account, uid, &far, 1).await;
     close_account(&cfg, &account).await;
 
     let recorder =

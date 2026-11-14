@@ -1,0 +1,10 @@
+{
+  "body": {
+    "has_next": false,
+    "items": [],
+    "next_cursor": ""
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "operations"
+}

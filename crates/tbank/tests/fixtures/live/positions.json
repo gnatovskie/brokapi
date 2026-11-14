@@ -1,0 +1,26 @@
+{
+  "body": {
+    "account_id": "<redacted>",
+    "blocked": [
+      {
+        "currency": "rub",
+        "nano": 0,
+        "units": 0
+      }
+    ],
+    "futures": [],
+    "limits_loading_in_progress": false,
+    "money": [
+      {
+        "currency": "rub",
+        "nano": 0,
+        "units": 1000000
+      }
+    ],
+    "options": [],
+    "securities": []
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "positions"
+}

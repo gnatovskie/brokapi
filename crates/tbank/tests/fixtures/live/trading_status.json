@@ -1,0 +1,17 @@
+{
+  "body": {
+    "api_trade_available_flag": true,
+    "bestprice_order_available_flag": true,
+    "class_code": "TQBR",
+    "figi": "<redacted>",
+    "instrument_uid": "<redacted>",
+    "limit_order_available_flag": true,
+    "market_order_available_flag": true,
+    "only_best_price": false,
+    "ticker": "SBER",
+    "trading_status": "NormalTrading"
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "trading_status"
+}

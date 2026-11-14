@@ -956,6 +956,19 @@ impl OrdersService for Mock {
         if r.account_id != ACCOUNT_A && r.account_id != ACCOUNT_B {
             return Err(Status::not_found("50004"));
         }
+        // A repeated order_id of the same account is refused with 30057 and the first order stands (the live
+        // sandbox, 14.11.2026: `repeat_second_post`).
+        if !r.order_id.is_empty()
+            && self
+                .0
+                .orders
+                .lock()
+                .unwrap()
+                .values()
+                .any(|o| o.request_id == r.order_id && o.account == r.account_id)
+        {
+            return Err(Status::invalid_argument("30057"));
+        }
         let id = self.0.next_id.fetch_add(1, Ordering::SeqCst);
         let o = MockOrder {
             exchange_id: format!("EX{id}"),

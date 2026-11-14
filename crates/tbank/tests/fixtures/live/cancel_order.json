@@ -1,0 +1,18 @@
+{
+  "body": {
+    "response_metadata": {
+      "server_time": {
+        "nanos": 290815198,
+        "seconds": 1794661959
+      },
+      "tracking_id": "<redacted>"
+    },
+    "time": {
+      "nanos": 290785877,
+      "seconds": 1794661959
+    }
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "cancel_order"
+}

@@ -1,0 +1,64 @@
+{
+  "body": {
+    "average_position_price": {
+      "currency": "rub",
+      "nano": 960000000,
+      "units": 293
+    },
+    "class_code": "TQBR",
+    "currency": "rub",
+    "direction": "Buy",
+    "executed_commission": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "executed_order_price": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "execution_report_status": "ExecutionReportStatusNew",
+    "figi": "<redacted>",
+    "initial_commission": {
+      "currency": "rub",
+      "nano": 146980000,
+      "units": 0
+    },
+    "initial_order_price": {
+      "currency": "rub",
+      "nano": 960000000,
+      "units": 293
+    },
+    "initial_security_price": {
+      "currency": "rub",
+      "nano": 960000000,
+      "units": 293
+    },
+    "instrument_uid": "<redacted>",
+    "lots_executed": 0,
+    "lots_requested": 1,
+    "order_date": {
+      "nanos": 50689000,
+      "seconds": 1794661959
+    },
+    "order_id": "<redacted>",
+    "order_request_id": "<redacted>",
+    "order_type": "Limit",
+    "service_commission": {
+      "currency": "rub",
+      "nano": 0,
+      "units": 0
+    },
+    "stages": [],
+    "ticker": "SBER",
+    "total_order_amount": {
+      "currency": "rub",
+      "nano": 960000000,
+      "units": 293
+    }
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "order_state"
+}

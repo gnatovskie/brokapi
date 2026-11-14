@@ -1,0 +1,8 @@
+{
+  "body": {
+    "stop_orders": []
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "stop_orders"
+}

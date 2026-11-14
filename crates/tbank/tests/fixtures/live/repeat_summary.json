@@ -1,0 +1,11 @@
+{
+  "body": {
+    "orders_with_this_order_id": 1,
+    "same_exchange_id": false,
+    "second_code": "InvalidArgument",
+    "second_post": "refused"
+  },
+  "broker": "tbank",
+  "outcome": "answered",
+  "probe": "repeat_summary"
+}

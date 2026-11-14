@@ -1,0 +1,9 @@
+{
+  "body": {
+    "message": "50002"
+  },
+  "broker": "tbank",
+  "code": "NotFound",
+  "outcome": "refused",
+  "probe": "instrument_unknown"
+}

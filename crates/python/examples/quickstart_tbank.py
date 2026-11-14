@@ -42,8 +42,10 @@ async def first_order(client: brokapi.Client) -> None:
     report = await client.reconcile([])  # a new bot has an empty ledger. Until now `place` is NotReconciled
     print(f"reconcile: {len(report.foreign)} foreign order(s) on the account")
 
-    # 4. An order far from the market: 90% of the best bid, rounded down to the price step, one lot.
-    price = brokapi.round_to_step(best_bid * Decimal("0.9"), params.price_step, brokapi.RoundMode.DOWN)
+    # 4. An order below the market that rests in the book: 98% of the best bid, rounded down to the price step, one lot.
+    #    T-Bank refuses a price outside the band of the instrument (30099, about 3% around the last price), so a
+    #    price much lower is refused, not left standing.
+    price = brokapi.round_to_step(best_bid * Decimal("0.98"), params.price_step, brokapi.RoundMode.DOWN)
     cid = brokapi.new_cid()  # a real bot writes the cid to its journal here, before `place`
     ack = await client.place(cid=cid, instrument=sber, side=brokapi.Side.BUY, qty=params.lot_size, price=price)
     print(f"placed: broker order id {ack.broker_id}, price {price}")

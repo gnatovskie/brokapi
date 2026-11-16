@@ -61,9 +61,9 @@ echo "==> API reference"
 # Start from an empty doc folder: pages of crates built earlier (or excluded now) must not leak into the site.
 rm -rf "$TARGET/doc"
 # The published brokapi-mocks crate is included for users writing tests. The root crate needs its broker features.
-# The reference opens in the light theme in the brokapi colors (docs/rustdoc-brokapi.css), takes the theme of the book from
+# The reference opens in the dark theme in the brokapi colors (docs/rustdoc-brokapi.css), takes the theme of the book from
 # localStorage (docs/reference/head.html) and has the thin bar of the book on top (docs/reference/bar.html).
-RUSTDOCFLAGS="${RUSTDOCFLAGS:--D warnings --default-theme=light --extend-css $(pwd)/docs/rustdoc-brokapi.css --html-in-header $(pwd)/docs/reference/head.html --html-before-content $(pwd)/docs/reference/bar.html}" cargo doc --no-deps --workspace --features brokapi/bcs,brokapi/tbank,brokapi/finam,brokapi/alor,brokapi/bybit
+RUSTDOCFLAGS="${RUSTDOCFLAGS:--D warnings --default-theme=dark --extend-css $(pwd)/docs/rustdoc-brokapi.css --html-in-header $(pwd)/docs/reference/head.html --html-before-content $(pwd)/docs/reference/bar.html}" cargo doc --no-deps --workspace --features brokapi/bcs,brokapi/tbank,brokapi/finam,brokapi/alor,brokapi/bybit
 rm -rf "$NEW/api"
 mkdir -p "$NEW/api"
 cp -r "$TARGET/doc/." "$NEW/api/"

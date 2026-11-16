@@ -792,6 +792,40 @@ fn a_fill_with_nothing_in_flight_is_not_held() {
     assert_eq!(executions(&h).len(), 1);
 }
 
+/// A command can finish through its RPC response without another stream frame.
+/// The driver's maintenance callback must release held fills in that case too.
+#[test]
+fn a_held_fill_is_delivered_after_the_command_finishes_without_another_frame() {
+    use brokapi_sansio::{BrokerCore, EventSink, OrderSignal};
+    let cid = ClientOrderId::from_bytes([9; 16]);
+    for signal in [
+        OrderSignal::Timeout,
+        OrderSignal::Rejected {
+            reason: "refused".into(),
+        },
+    ] {
+        let mut h = ud_harness_with_trades();
+        let now = h.now();
+        h.core_mut().orders().register_place(cid, now);
+        h.feed_frame(trades_frame(vec![stream_trade("555")]));
+        assert!(executions(&h).is_empty());
+        h.core_mut().orders().apply_signal(cid, signal, now);
+        let mut sink = EventSink::new();
+        h.core_mut().on_timeout(now, &mut sink);
+        let delivered = sink.drain();
+        assert_eq!(
+            delivered.len(),
+            1,
+            "a held fill must not wait for unrelated traffic"
+        );
+        assert!(
+            matches!(&delivered[0].payload, Event::Execution(x) if x.cid.is_none() && x.broker_order_id.as_str() == "555")
+        );
+        h.core_mut().on_timeout(now, &mut sink);
+        assert!(sink.drain().is_empty(), "deliver only once");
+    }
+}
+
 #[test]
 fn own_trades_carry_the_cid_when_the_order_is_ours() {
     let cid = ClientOrderId::from_bytes([5; 16]);

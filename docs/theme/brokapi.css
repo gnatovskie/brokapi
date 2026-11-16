@@ -1,7 +1,4 @@
-/* brokapi documentation, design variant A "Engineering Precision" (decision of Zor 12.11.2026, context/design.md, the model is
-   designs/concept-a-engineering/styles/docs.css). Dark graphite is the main theme ("coal"), the light one is "light". Thin rules,
-   the blue of a wire for links and the active item, the orange only as a signal. Geist and Geist Mono.
-   mdBook gives the theme its colors through variables, so most of the work is the variables below. */
+/* brokapi documentation: dark graphite and a light alternative, Geist and Geist Mono. */
 
 :root {
   --mono-font: 'Geist Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
@@ -273,7 +270,8 @@ main:focus, body:focus { outline: none; }
 
 /* Code: dark block in both themes, the inline code on a panel */
 code, pre, .hljs, pre > .buttons { font-family: var(--mono-font); }
-:not(pre) > code { background: var(--bk-soft); border: 1px solid var(--bk-line); border-radius: 4px; padding: 0.08em 0.32em; color: var(--inline-code-color); font-size: 0.86em; font-weight: 500; }
+.content :not(pre) > code.hljs { background: var(--bk-soft); border: 1px solid var(--bk-line); border-radius: 4px; padding: 0.08em 0.32em; color: var(--inline-code-color); font-size: 0.86em; font-weight: 500; }
+.content :not(pre) > code.hljs span { color: inherit; }
 pre { border: 1px solid var(--bk-line2); border-radius: 9px; background: var(--bk-code-bg); margin: 1.2em 0; }
 pre > code, pre > .hljs { background: transparent; padding: 16px 18px; font-size: 13px; line-height: 1.65; border-radius: 9px; }
 .content pre code, .content pre .hljs { color: var(--bk-code-ink); }
@@ -652,7 +650,7 @@ pre.mermaid, .mermaid { background: var(--bk-soft); border-color: var(--bk-line2
 }
 @media (max-width: 400px) { .brand-word { display: none; } }
 
-/* ===== Variant A, as in the model (designs/concept-a-engineering/docs): the header over the whole width, the sidebar with numbered parts ===== */
+/* ===== Variant A, the header over the whole width, the sidebar with numbered parts ===== */
 #mdbook-menu-bar { position: fixed; top: 0; left: 0; right: 0; margin: 0; height: var(--menu-bar-height); z-index: 120; box-sizing: border-box; }
 .page { padding-top: var(--menu-bar-height); }
 .sidebar { top: var(--menu-bar-height); }

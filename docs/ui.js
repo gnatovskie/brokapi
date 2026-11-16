@@ -457,9 +457,9 @@
       var html = document.documentElement;
       var from = html.classList.contains('light') ? 'light' : 'coal';
       var to = from === 'light' ? 'coal' : 'light';
-      html.classList.remove(from);
-      html.classList.add(to);
-      try { localStorage.setItem('mdbook-theme', to); } catch (err) { /* private window: the choice lasts for the page only */ }
+      // mdBook also switches syntax stylesheets and tracks the previous theme. Changing
+      // only the html class leaves dark highlighting behind on a light page (and vice versa).
+      document.getElementById('mdbook-theme-' + to).click();
       btn.setAttribute('aria-pressed', to === 'coal' ? 'true' : 'false');
       // The diagrams take their colors at load: draw them again in the colors of the new theme.
       if (document.querySelector('pre.mermaid')) location.reload();

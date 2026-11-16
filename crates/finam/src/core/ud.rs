@@ -23,6 +23,8 @@ use crate::map::portfolio::{map_account, map_trade};
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum UdEvent {
+    /// A command completed, or the driver's maintenance timer expired. Independent of a subscription.
+    Maintenance,
     /// A message of the order stream: current states of changed orders.
     Orders(pb::SubscribeOrdersResponse),
     /// A message of the own trades stream.
@@ -245,6 +247,10 @@ impl BrokerCore for UdCore {
 
     fn on_frame(&mut self, frame: UdFrame, now: Instant, out: &mut EventSink) {
         let UdFrame { sub, event } = frame;
+        if matches!(event, UdEvent::Maintenance) {
+            self.on_timeout(now, out);
+            return;
+        }
         let Some(kind) = self.subs.get(&sub).copied() else {
             return;
         };
@@ -331,7 +337,10 @@ impl BrokerCore for UdCore {
         None
     }
 
-    fn on_timeout(&mut self, _now: Instant, _out: &mut EventSink) {}
+    fn on_timeout(&mut self, now: Instant, out: &mut EventSink) {
+        self.orders.sweep_timeouts(now);
+        self.release_early(now, out);
+    }
 
     /// Order-state and portfolio subscriptions. Executions are registered with `register`
     /// because `SubscriptionKind` has no variant for them.

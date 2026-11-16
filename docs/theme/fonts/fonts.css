@@ -1,7 +1,4 @@
-/* Free fonts only, files lie next to this css: no request to other sites.
-   Geist and Geist Mono (OFL, licenses GEIST-LICENSE.txt and GEIST-MONO-LICENSE.txt in this folder). Design: variant A (context/design.md).
-   The IBM Plex files stay in this folder only for the API references (rustdoc and pdoc), which still use them. */
-
+/* Geist and Geist Mono, OFL licenses in this directory. */
 @font-face {
   font-family: 'Geist';
   font-style: normal;

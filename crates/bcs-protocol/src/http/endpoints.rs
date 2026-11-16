@@ -963,8 +963,8 @@ impl BcsHttpClient {
     /// # let server = brokapi_mocks::bcs::MockServer::start(Default::default()).await;
     /// # let cfg = brokapi_bcs_protocol::config::BcsConfig::for_mock("mock-refresh-token", &server.http_base).with_write(true);
     /// use brokapi_bcs_protocol::http::client::BcsHttpClient;
-    /// use brokapi_bcs_protocol::http::models::{CreateOrderRequest, EditOrderRequest, OrderExtras};
-    /// use brokapi_bcs_protocol::models::enums::{OrderSide, OrderType};
+    /// use brokapi_bcs_protocol::http::models::{CreateOrderRequest, EditOrderRequest, OrderExtras, OrderType};
+    /// use brokapi_bcs_protocol::models::enums::OrderSide;
     /// use uuid::Uuid;
     ///
     /// let client = BcsHttpClient::new(cfg)?;
@@ -1016,8 +1016,8 @@ impl BcsHttpClient {
     /// # let server = brokapi_mocks::bcs::MockServer::start(Default::default()).await;
     /// # let cfg = brokapi_bcs_protocol::config::BcsConfig::for_mock("mock-refresh-token", &server.http_base).with_write(true);
     /// use brokapi_bcs_protocol::http::client::BcsHttpClient;
-    /// use brokapi_bcs_protocol::http::models::{CreateOrderRequest, EditOrderRequest, OrderExtras};
-    /// use brokapi_bcs_protocol::models::enums::{OrderSide, OrderType};
+    /// use brokapi_bcs_protocol::http::models::{CreateOrderRequest, EditOrderRequest, OrderExtras, OrderType};
+    /// use brokapi_bcs_protocol::models::enums::OrderSide;
     /// use uuid::Uuid;
     ///
     /// let client = BcsHttpClient::new(cfg)?;

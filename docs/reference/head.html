@@ -5,7 +5,7 @@
   var t = null;
   try { t = localStorage.getItem('mdbook-theme'); } catch (e) {}
   if (t && t.charAt(0) === '"') t = t.slice(1, -1);
-  var dark = t ? t === 'coal' : !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  var dark = t !== 'light';
   document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
   try {
     localStorage.setItem('rustdoc-theme', dark ? 'dark' : 'light');

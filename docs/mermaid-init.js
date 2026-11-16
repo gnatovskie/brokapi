@@ -70,13 +70,13 @@
             box.classList.add('is-wide');
         }
     };
-    // Mermaid sizes every box by measuring its label at drawing time. Drawn before IBM Plex Sans has loaded, the
+    // Mermaid sizes every box by measuring its label at drawing time. Drawn before Geist has loaded, the
     // boxes fit the fallback font, then the wider web font clips the last letters. So wait for the fonts first
     // (with a time limit, so a font that never loads does not keep the diagrams from drawing).
     const fontsReady = () => {
         if (!document.fonts) return Promise.resolve();
         // The font is split by alphabet (unicode-range): ask for Cyrillic and Latin text, or only one file loads.
-        const loads = ["14px 'IBM Plex Sans'", "600 14px 'IBM Plex Sans'"]
+        const loads = ["14px 'Geist'", "600 14px 'Geist'"]
             .map((f) => document.fonts.load(f, 'Аа Яя Aa Zz').catch(() => {}));
         const limit = new Promise((resolve) => setTimeout(resolve, 6000));
         return Promise.race([Promise.all(loads).then(() => document.fonts.ready), limit]);

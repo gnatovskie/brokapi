@@ -96,25 +96,45 @@ struct UdShared {
 }
 
 impl UdShared {
-    fn signal(&self, cid: ClientOrderId, signal: OrderSignal) {
+    async fn signal(&self, cid: ClientOrderId, signal: OrderSignal) {
         self.core
             .lock()
             .expect("core poisoned")
             .orders()
             .apply_signal(cid, signal, brokapi_runtime::now());
+        self.wake_pump().await;
+    }
+
+    async fn wake_pump(&self) {
+        // The pump owns delivery and backpressure. An RPC response must wake it even when
+        // the broker sends no further stream frames; otherwise held executions stay stuck.
+        if self
+            .frames
+            .send(UdFrame {
+                sub: brokapi_core::SubscriptionId(0),
+                event: UdEvent::Maintenance,
+            })
+            .await
+            .is_err()
+        {
+            warn!("user data pump closed before command maintenance could be delivered");
+        }
     }
 
     /// Folds a failed command into the public error and the local order lifecycle.
-    fn command_failed(&self, cid: ClientOrderId, e: &FinamError) -> Error {
+    async fn command_failed(&self, cid: ClientOrderId, e: &FinamError) -> Error {
         let err = map_command_err(e);
         match &err {
-            Error::Unknown => self.signal(cid, OrderSignal::Timeout),
-            other => self.signal(
-                cid,
-                OrderSignal::Rejected {
-                    reason: other.to_string(),
-                },
-            ),
+            Error::Unknown => self.signal(cid, OrderSignal::Timeout).await,
+            other => {
+                self.signal(
+                    cid,
+                    OrderSignal::Rejected {
+                        reason: other.to_string(),
+                    },
+                )
+                .await
+            }
         }
         if matches!(err, Error::Unknown) {
             warn!(?cid, error = %e, "place outcome unknown");
@@ -484,6 +504,7 @@ impl UserDataConnector {
                     for cid in forgotten {
                         inner.locks.forget(cid);
                     }
+                    inner.wake_pump().await;
                 }
             });
         }
@@ -986,26 +1007,30 @@ impl OrderExecutor for UserDataConnector {
             match sent {
                 Ok(os) => {
                     if let Some(rej) = rejection_of(&os) {
-                        inner.signal(
-                            cid,
-                            OrderSignal::Rejected {
-                                reason: rej.to_string(),
-                            },
-                        );
+                        inner
+                            .signal(
+                                cid,
+                                OrderSignal::Rejected {
+                                    reason: rej.to_string(),
+                                },
+                            )
+                            .await;
                         return Err(rej);
                     }
                     if os.order_id.is_empty() {
-                        inner.signal(cid, OrderSignal::Timeout);
+                        inner.signal(cid, OrderSignal::Timeout).await;
                         return Err(Error::Unknown);
                     }
                     inner.index.bind(cid, &os.order_id);
                     let broker_id = brokapi_core::BrokerOrderId::new(os.order_id.clone());
-                    inner.signal(
-                        cid,
-                        OrderSignal::Ack {
-                            broker_id: broker_id.clone(),
-                        },
-                    );
+                    inner
+                        .signal(
+                            cid,
+                            OrderSignal::Ack {
+                                broker_id: broker_id.clone(),
+                            },
+                        )
+                        .await;
                     Ok(OrderAck {
                         cid,
                         broker_id,
@@ -1015,7 +1040,7 @@ impl OrderExecutor for UserDataConnector {
                         ),
                     })
                 }
-                Err(e) => Err(inner.command_failed(cid, &e)),
+                Err(e) => Err(inner.command_failed(cid, &e).await),
             }
         };
         match brokapi_runtime::run_detached(work).await {

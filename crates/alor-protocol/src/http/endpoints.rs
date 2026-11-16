@@ -856,7 +856,8 @@ impl AlorHttpClient {
     }
 
     /// `DELETE .../orders/{orderId}`: cancels an order, or a stop order when `stop` is set. The broker names the
-    /// exchange and the portfolio in the query, not in the path.
+    /// exchange and the portfolio in the query, not in the path. Without `jsonResponse=true` the broker answers
+    /// with the bare text `success` (text/plain), which is not JSON: a done cancel would read as a parse error.
     ///
     /// # Errors
     ///
@@ -872,6 +873,7 @@ impl AlorHttpClient {
             ("portfolio", portfolio.to_string()),
             ("exchange", exchange.to_string()),
             ("stop", stop.to_string()),
+            ("jsonResponse", "true".to_string()),
             ("format", "Simple".to_string()),
         ];
         self.command(

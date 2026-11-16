@@ -11,6 +11,8 @@
 //! ALOR_LIVE_BOARD=TQBR             # optional, default TQBR
 //! ALOR_LIVE_TRADE=1                # opt-in: places ONE real limit order far from the market
 //! ALOR_LIVE_PRICE=<price>          # far BELOW the market, a multiple of the price step
+//! ALOR_LIVE_REPLACE=1              # optional: also replace the order (needs about two margins)
+//! ALOR_ALLOW_MARGIN=1              # derivatives market for a low-risk client: the owner's consent
 //!
 //! cargo test -p brokapi-alor --features integration-live --test live -- --nocapture --test-threads=1 live_md_reference_and_streams
 //! ```
@@ -180,7 +182,12 @@ async fn live_ud_portfolio_and_orders() {
     ud.shutdown(ShutdownMode::Immediate).await;
 }
 
-/// One real limit order far below the market, then replace and cancel. Needs `ALOR_LIVE_TRADE=1`.
+/// One real limit order far below the market: place, the stream event, a restart and the reconcile, an optional
+/// replace, the cancel. Needs `ALOR_LIVE_TRADE=1`. `ALOR_LIVE_REPLACE=1` adds the replace: on the derivatives
+/// market ALOR checks the margin of the new order without releasing the old one, so it needs about two margins.
+///
+/// Whatever step fails, the test then cancels every active order with one of its cids (found by the cid in the
+/// order comment, so after a restart too) and only then fails: a real order is never left at the exchange.
 #[tokio::test]
 async fn live_order_roundtrip() {
     if env("ALOR_LIVE_TRADE").is_none() {
@@ -191,16 +198,7 @@ async fn live_order_roundtrip() {
         .expect("ALOR_LIVE_PRICE")
         .parse()
         .expect("a number");
-    let (tx, mut rx) = mpsc::channel(256);
-    let ud = UserDataConnector::start(UserDataConfig::new(config(), "alor-ud"), limiter(), tx)
-        .await
-        .expect("ud start");
-    ud.reconcile(&[]).await.expect("reconcile");
-    ud.subscribe_order_state()
-        .await
-        .expect("subscribe_order_state");
     let id = instrument();
-    let cid = ClientOrderId::new_v4();
     let md_cfg = MarketDataConfig::new(config(), "alor-md");
     let (mtx, _mrx) = mpsc::channel(8);
     let md = MarketDataConnector::start(md_cfg, limiter(), mtx)
@@ -211,6 +209,66 @@ async fn live_order_roundtrip() {
         .await
         .expect("trading_params")
         .lot_size;
+    md.shutdown(ShutdownMode::Immediate).await;
+
+    let mut ours = vec![ClientOrderId::new_v4()];
+    let outcome = order_steps(&id, lot, Price::new(price), &mut ours).await;
+    let leftovers = cancel_ours(&ours).await;
+    if let Err(e) = outcome {
+        panic!("{e}; cleanup: {leftovers}");
+    }
+    println!("cleanup: {leftovers}");
+}
+
+async fn start_ud() -> Result<(UserDataConnector, mpsc::Receiver<Envelope>), String> {
+    let (tx, rx) = mpsc::channel(256);
+    let ud = UserDataConnector::start(UserDataConfig::new(config(), "alor-ud"), limiter(), tx)
+        .await
+        .map_err(|e| format!("ud start: {e:?}"))?;
+    Ok((ud, rx))
+}
+
+/// Like [`next`], but an error instead of a panic: the caller still has an order to cancel.
+async fn try_next(
+    rx: &mut mpsc::Receiver<Envelope>,
+    what: &str,
+    pred: impl Fn(&Event) -> bool,
+) -> Result<Envelope, String> {
+    timeout(Duration::from_secs(30), async {
+        while let Some(env) = rx.recv().await {
+            if pred(&env.payload) {
+                return Ok(env);
+            }
+        }
+        Err(format!("event channel closed while waiting for {what}"))
+    })
+    .await
+    .unwrap_or_else(|_| Err(format!("no {what} within 30 s")))
+}
+
+/// The steps with a live order. `ours` collects every cid sent to the broker, for the cleanup.
+async fn order_steps(
+    id: &InstrumentId,
+    lot: Qty,
+    price: Price,
+    ours: &mut Vec<ClientOrderId>,
+) -> Result<(), String> {
+    use brokapi_core::OrderState;
+    let mut cid = ours[0];
+    let (ud, mut rx) = start_ud().await?;
+    let before = ud
+        .reconcile(&[])
+        .await
+        .map_err(|e| format!("reconcile: {e:?}"))?;
+    if !before.foreign.is_empty() {
+        return Err(format!(
+            "{} active orders before the test: not placing",
+            before.foreign.len()
+        ));
+    }
+    ud.subscribe_order_state()
+        .await
+        .map_err(|e| format!("subscribe_order_state: {e:?}"))?;
     let ack = ud
         .place(PlaceOrderRequest {
             cid,
@@ -218,37 +276,106 @@ async fn live_order_roundtrip() {
             side: Side::Buy,
             order_type: OrderType::Limit,
             qty: lot,
-            price: Some(Price::new(price)),
+            price: Some(price),
         })
         .await
-        .expect("place");
+        .map_err(|e| format!("place: {e:?}"))?;
     println!("placed {ack:?}");
-    next(
+    try_next(
         &mut rx,
         "the order event",
         |e| matches!(e, Event::Order(o) if o.cid == cid),
     )
-    .await;
-    println!(
-        "state: {:?}",
-        ud.order_state(cid).await.expect("order_state")
-    );
-    let second = ClientOrderId::new_v4();
-    let replaced = ud
-        .replace(brokapi_core::ReplaceOrderRequest {
-            cid: second,
-            original_cid: cid,
-            qty: Some(Qty::new(lot.decimal())),
-            price: Some(Price::new(price)),
-        })
+    .await?;
+    let state = ud
+        .order_state(cid)
         .await
-        .expect("replace");
-    println!("replaced {replaced:?}");
-    ud.cancel(second).await.expect("cancel");
-    println!(
-        "active after the cancel: {:?}",
-        ud.active_orders().await.expect("active_orders")
-    );
-    md.shutdown(ShutdownMode::Immediate).await;
+        .map_err(|e| format!("order_state: {e:?}"))?;
+    println!("state: {:?}", state.state);
+    if !matches!(state.state, OrderState::Acked { .. }) {
+        return Err(format!("expected Acked, got {:?}", state.state));
+    }
+
+    // A restart: a new connector must find the order by the cid in its comment.
     ud.shutdown(ShutdownMode::Immediate).await;
+    let (ud, mut rx) = start_ud().await?;
+    let report = ud
+        .reconcile(&[cid])
+        .await
+        .map_err(|e| format!("reconcile after restart: {e:?}"))?;
+    println!(
+        "after restart: confirmed {:?}, closed offline {:?}, foreign {}",
+        report.confirmed.iter().map(|s| s.cid).collect::<Vec<_>>(),
+        report.closed_offline,
+        report.foreign.len()
+    );
+    if !report
+        .confirmed
+        .iter()
+        .any(|s| s.cid == cid && s.broker_id == Some(ack.broker_id.clone()))
+    {
+        return Err("the order is not confirmed by the reconcile after the restart".into());
+    }
+    ud.subscribe_order_state()
+        .await
+        .map_err(|e| format!("subscribe_order_state after restart: {e:?}"))?;
+
+    if env("ALOR_LIVE_REPLACE").is_some() {
+        let second = ClientOrderId::new_v4();
+        ours.push(second);
+        let replaced = ud
+            .replace(brokapi_core::ReplaceOrderRequest {
+                cid: second,
+                original_cid: cid,
+                qty: Some(Qty::new(lot.decimal())),
+                price: Some(price),
+            })
+            .await
+            .map_err(|e| format!("replace: {e:?}"))?;
+        println!("replaced {replaced:?}");
+        cid = second;
+    } else {
+        println!("replace skipped: ALOR_LIVE_REPLACE is not set");
+    }
+
+    ud.cancel(cid).await.map_err(|e| format!("cancel: {e:?}"))?;
+    try_next(&mut rx, "the cancel event", |e| {
+        matches!(e, Event::Order(o) if o.cid == cid && matches!(o.state, OrderState::Cancelled { .. }))
+    })
+    .await?;
+    let after = ud
+        .order_state(cid)
+        .await
+        .map_err(|e| format!("order_state after cancel: {e:?}"))?;
+    println!("after cancel: {:?}", after.state);
+    if !matches!(after.state, OrderState::Cancelled { .. }) {
+        return Err(format!("expected Cancelled, got {:?}", after.state));
+    }
+    ud.shutdown(ShutdownMode::Immediate).await;
+    Ok(())
+}
+
+/// Cancels every active order with one of `ours` through a fresh connector. Returns what it did, for the report.
+async fn cancel_ours(ours: &[ClientOrderId]) -> String {
+    let (ud, _rx) = match start_ud().await {
+        Ok(v) => v,
+        Err(e) => return format!("FAILED, check the account by hand: {e}"),
+    };
+    let active = match ud.active_orders().await {
+        Ok(v) => v,
+        Err(e) => return format!("FAILED to list active orders, check the account by hand: {e:?}"),
+    };
+    let mut done = Vec::new();
+    for s in active.iter().filter(|s| ours.contains(&s.cid)) {
+        match ud.cancel(s.cid).await {
+            Ok(()) => done.push(format!("cancelled {}", s.cid)),
+            Err(e) => done.push(format!("FAILED to cancel {}, cancel by hand: {e:?}", s.cid)),
+        }
+    }
+    ud.shutdown(ShutdownMode::Immediate).await;
+    if done.is_empty() {
+        "nothing of ours active".into()
+    } else {
+        done.join("; ")
+    }
 }

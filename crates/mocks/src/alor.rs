@@ -1178,10 +1178,16 @@ fn handle_command(
             if !o.is_stop() {
                 b.push("orders", owner, &o.json());
             }
-            (
-                200,
-                json!({"message": "success", "orderNumber": id}).to_string(),
-            )
+            // Like the broker (live 16.11.2026, `rest/openapi.yaml`): the body is the bare text `success`
+            // (text/plain) unless `jsonResponse=true` asks for JSON.
+            if param(q, "jsonResponse") == Some("true") {
+                (
+                    200,
+                    json!({"message": "success", "orderNumber": id}).to_string(),
+                )
+            } else {
+                (200, "success".to_string())
+            }
         }
         _ => err(404, "method not found"),
     }

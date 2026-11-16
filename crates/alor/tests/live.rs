@@ -13,6 +13,7 @@
 //! ALOR_LIVE_PRICE=<price>          # far BELOW the market, a multiple of the price step
 //! ALOR_LIVE_REPLACE=1              # optional: also replace the order (needs about two margins)
 //! ALOR_ALLOW_MARGIN=1              # derivatives market for a low-risk client: the owner's consent
+//! ALOR_LIVE_STOP_PRICE=<price>     # SELL stops far BELOW the market; price and price * 0.99 on the price step
 //!
 //! cargo test -p brokapi-alor --features integration-live --test live -- --nocapture --test-threads=1 live_md_reference_and_streams
 //! ```
@@ -377,5 +378,72 @@ async fn cancel_ours(ours: &[ClientOrderId]) -> String {
         "nothing of ours active".into()
     } else {
         done.join("; ")
+    }
+}
+
+/// Stop orders far from the market: the common conformance path (a SELL stop-loss cancelled by cid, a SELL
+/// stop-limit cancelled by the broker id, a stop-limit without a limit price refused locally). Needs
+/// `ALOR_LIVE_TRADE=1` and `ALOR_LIVE_STOP_PRICE` far BELOW the market, so that nothing triggers.
+///
+/// Refuses to start when the account already has active stop orders. Whatever step fails, every stop order
+/// that was not there before is cancelled, and only then the test fails.
+#[tokio::test]
+async fn live_stop_order_roundtrip() {
+    use brokapi_core::{StopOrderExecutor, StopOrderRef};
+    use futures_util::FutureExt;
+
+    if env("ALOR_LIVE_TRADE").is_none() {
+        println!("skipped: ALOR_LIVE_TRADE is not set");
+        return;
+    }
+    let stop: Decimal = env("ALOR_LIVE_STOP_PRICE")
+        .expect("ALOR_LIVE_STOP_PRICE")
+        .parse()
+        .expect("a number");
+    let (ud, _rx) = start_ud().await.unwrap_or_else(|e| panic!("{e}"));
+    ud.reconcile(&[]).await.expect("reconcile");
+    assert!(ud.caps().supports_stop_orders);
+    let before = ud.active_stop_orders().await.expect("active_stop_orders");
+    assert!(
+        before.is_empty(),
+        "{} active stop orders before the test: not placing",
+        before.len()
+    );
+
+    let outcome = std::panic::AssertUnwindSafe(brokapi_conformance::stop_order_far_from_market(
+        &ud,
+        &instrument(),
+        Price::new(stop),
+    ))
+    .catch_unwind()
+    .await;
+
+    let mut cleanup = Vec::new();
+    match ud.active_stop_orders().await {
+        Ok(left) => {
+            for s in left {
+                let id = s.broker_id.clone();
+                match ud.cancel_stop(StopOrderRef::Broker(id.clone())).await {
+                    Ok(()) => cleanup.push(format!("cancelled stop {}", id.as_str())),
+                    Err(e) => cleanup.push(format!(
+                        "FAILED to cancel stop {}, cancel by hand: {e:?}",
+                        id.as_str()
+                    )),
+                }
+            }
+        }
+        Err(e) => cleanup.push(format!(
+            "FAILED to list stop orders, check the account by hand: {e:?}"
+        )),
+    }
+    ud.shutdown(ShutdownMode::Immediate).await;
+    let cleanup = if cleanup.is_empty() {
+        "nothing left".to_string()
+    } else {
+        cleanup.join("; ")
+    };
+    println!("cleanup: {cleanup}");
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
     }
 }

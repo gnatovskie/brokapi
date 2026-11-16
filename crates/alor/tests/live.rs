@@ -447,3 +447,191 @@ async fn live_stop_order_roundtrip() {
         std::panic::resume_unwind(panic);
     }
 }
+
+/// A real fill: a market buy of one lot, then a market sell of it. Needs `ALOR_LIVE_FILL=1` (it costs the spread
+/// and two commissions). Checks the order state `Filled`, the fills with our cid in the stream and in the history,
+/// the position of one lot and then none.
+///
+/// Refuses to start when the account has a position in the instrument or an active order. Whatever step fails, an
+/// open position in the instrument is closed by a market order the other way, and only then the test fails.
+#[tokio::test]
+async fn live_fill_roundtrip() {
+    if env("ALOR_LIVE_FILL").as_deref() != Some("1") {
+        println!("skipped: ALOR_LIVE_FILL=1 is not set");
+        return;
+    }
+    let id = instrument();
+    let (ud, mut rx) = start_ud().await.unwrap_or_else(|e| panic!("{e}"));
+    let report = ud.reconcile(&[]).await.expect("reconcile");
+    assert!(
+        report.foreign.is_empty(),
+        "{} active orders before the test: not trading",
+        report.foreign.len()
+    );
+    let held = position_of(&ud, &id).await.expect("positions");
+    assert!(
+        held.is_zero(),
+        "a position of {held} in the instrument before the test: not trading"
+    );
+    let md_cfg = MarketDataConfig::new(config(), "alor-md");
+    let (mtx, _mrx) = mpsc::channel(8);
+    let md = MarketDataConnector::start(md_cfg, limiter(), mtx)
+        .await
+        .expect("md start");
+    let lot = md
+        .trading_params(&id)
+        .await
+        .expect("trading_params")
+        .lot_size;
+    md.shutdown(ShutdownMode::Immediate).await;
+
+    let started = now_nanos();
+    let outcome = fill_steps(&ud, &mut rx, &id, lot).await;
+
+    // Whatever happened: no position is left open.
+    let cleanup = match position_of(&ud, &id).await {
+        Ok(q) if q.is_zero() => "no position left".to_string(),
+        Ok(q) => {
+            let side = if q.is_sign_positive() {
+                Side::Sell
+            } else {
+                Side::Buy
+            };
+            let qty = Qty::new(q.abs());
+            match ud
+                .place(PlaceOrderRequest {
+                    cid: ClientOrderId::new_v4(),
+                    instrument: id.clone(),
+                    side,
+                    order_type: OrderType::Market,
+                    qty,
+                    price: None,
+                })
+                .await
+            {
+                Ok(_) => format!("closed a position of {q} by a market {side:?}"),
+                Err(e) => format!("FAILED to close a position of {q}, close it by hand: {e:?}"),
+            }
+        }
+        Err(e) => format!("FAILED to read positions, check the account by hand: {e:?}"),
+    };
+    println!("cleanup: {cleanup}");
+    let fills = ud
+        .executions(TimeRange::new(
+            UnixNanos::from_nanos(started - 60 * 1_000_000_000),
+            UnixNanos::from_nanos(now_nanos()),
+        ))
+        .await;
+    println!("fills since the start: {fills:?}");
+    ud.shutdown(ShutdownMode::Immediate).await;
+    if let Err(e) = outcome {
+        panic!("{e}; cleanup: {cleanup}");
+    }
+}
+
+/// The signed quantity held in `id` (0 when there is no line for it).
+async fn position_of(ud: &UserDataConnector, id: &InstrumentId) -> Result<Decimal, String> {
+    let all = ud
+        .positions()
+        .await
+        .map_err(|e| format!("positions: {e:?}"))?;
+    Ok(all
+        .iter()
+        .filter(|p| p.instrument.key == id.key)
+        .map(|p| p.qty.decimal())
+        .sum())
+}
+
+/// Waits until the position in `id` is `want`: the account of the broker may show a fill a moment later.
+async fn wait_position(
+    ud: &UserDataConnector,
+    id: &InstrumentId,
+    want: Decimal,
+) -> Result<(), String> {
+    let end = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let q = position_of(ud, id).await?;
+        if q == want {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() > end {
+            return Err(format!("the position is {q}, expected {want} within 15 s"));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+async fn fill_steps(
+    ud: &UserDataConnector,
+    rx: &mut mpsc::Receiver<Envelope>,
+    id: &InstrumentId,
+    lot: Qty,
+) -> Result<(), String> {
+    use brokapi_core::OrderState;
+    ud.subscribe_order_state()
+        .await
+        .map_err(|e| format!("subscribe_order_state: {e:?}"))?;
+    ud.subscribe_executions()
+        .await
+        .map_err(|e| format!("subscribe_executions: {e:?}"))?;
+    for (side, want) in [(Side::Buy, lot.decimal()), (Side::Sell, Decimal::ZERO)] {
+        let cid = ClientOrderId::new_v4();
+        let ack = ud
+            .place(PlaceOrderRequest {
+                cid,
+                instrument: id.clone(),
+                side,
+                order_type: OrderType::Market,
+                qty: lot,
+                price: None,
+            })
+            .await
+            .map_err(|e| format!("place {side:?}: {e:?}"))?;
+        println!("{side:?} placed {ack:?}");
+        // The fill and the order state `Filled` come in either order: wait for both, print every event of the order.
+        let (mut got_fill, mut got_filled) = (false, false);
+        let end = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !(got_fill && got_filled) {
+            let left = end.saturating_duration_since(tokio::time::Instant::now());
+            let env = match timeout(left, rx.recv()).await {
+                Ok(Some(env)) => env,
+                Ok(None) => return Err("the event channel closed".into()),
+                Err(_) => {
+                    return Err(format!(
+                        "within 30 s: fill {got_fill}, order Filled {got_filled}"
+                    ));
+                }
+            };
+            match &env.payload {
+                Event::Execution(x) if x.cid == Some(cid) => {
+                    println!(
+                        "{side:?} fill: price {} qty {} commission {:?} trade {}",
+                        x.price, x.qty, x.commission, x.trade_id
+                    );
+                    if x.side != side || x.qty != lot {
+                        return Err(format!("the fill does not match the order: {x:?}"));
+                    }
+                    got_fill = true;
+                }
+                Event::Order(o) if o.cid == cid => {
+                    println!("{side:?} order event: {:?} filled {}", o.state, o.filled);
+                    got_filled |= matches!(o.state, OrderState::Filled { .. });
+                }
+                _ => {}
+            }
+        }
+        let state = ud
+            .order_state(cid)
+            .await
+            .map_err(|e| format!("order_state: {e:?}"))?;
+        if !matches!(state.state, OrderState::Filled { .. }) || state.filled != lot {
+            return Err(format!(
+                "expected Filled with {lot}, got {:?} filled {}",
+                state.state, state.filled
+            ));
+        }
+        wait_position(ud, id, want).await?;
+        println!("{side:?}: Filled, the position is {want}");
+    }
+    Ok(())
+}

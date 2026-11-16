@@ -106,7 +106,9 @@ impl Settings {
         Ok(cfg)
     }
 
-    /// The ALOR connector configuration: `refresh_token`, `portfolio`, `exchange`, `test`, `endpoint`.
+    /// The ALOR connector configuration: `refresh_token`, `portfolio`, `exchange`, `test`, `endpoint`, `allow_margin`
+    /// (`ALOR_ALLOW_MARGIN`: the owner's consent to an uncovered position, see `AlorConfig::allow_margin`; off unless
+    /// given).
     pub fn alor(&self) -> Result<AlorConfig, Error> {
         let token = self
             .text("refresh_token", "ALOR_REFRESH_TOKEN")
@@ -129,6 +131,7 @@ impl Settings {
         if let Some(exchange) = self.text("exchange", "ALOR_EXCHANGE") {
             cfg = cfg.with_exchange(exchange);
         }
+        cfg = cfg.with_allow_margin(self.flag("allow_margin", "ALOR_ALLOW_MARGIN"));
         if let Some(t) = self.request_timeout()? {
             cfg.request_timeout = t;
         }
@@ -304,5 +307,13 @@ mod tests {
             tbank(serde_json::json!({ "root_certificate": "/no/such/dir/root.pem" })).unwrap_err();
         assert!(matches!(err, Error::Config(_)), "{err:?}");
         assert!(err.to_string().contains("/no/such/dir/root.pem"), "{err}");
+    }
+
+    #[test]
+    fn the_margin_consent_of_alor_is_a_setting_and_off_by_default() {
+        let on = with(serde_json::json!({ "refresh_token": "r", "allow_margin": true }));
+        assert!(on.alor().unwrap().allow_margin);
+        let off = with(serde_json::json!({ "refresh_token": "r", "allow_margin": false }));
+        assert!(!off.alor().unwrap().allow_margin);
     }
 }

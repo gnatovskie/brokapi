@@ -673,6 +673,7 @@ async def connect(
     portfolio: Optional[str] = None,
     exchange: Optional[str] = None,
     test: Optional[bool] = None,
+    allow_margin: Optional[bool] = None,
     endpoint: Optional[str] = None,
     name: Optional[str] = None,
     limiter: Optional[Limiter] = None,
@@ -742,7 +743,9 @@ async def connect(
       (``FINAM_API_URL``).
     - ``alor``: ``refresh_token`` (``ALOR_REFRESH_TOKEN``, required), ``portfolio`` (``ALOR_PORTFOLIO``, required when
       the account has several portfolios), ``exchange`` (``ALOR_EXCHANGE``, ``MOEX`` or ``SPBX``, default ``MOEX``),
-      ``test`` (``ALOR_TEST``, ``true``: the test contour of the broker, with a test account).
+      ``test`` (``ALOR_TEST``, ``true``: the test contour of the broker, with a test account),
+      ``allow_margin`` (``ALOR_ALLOW_MARGIN``, ``true``: the owner's consent to an uncovered position, which the broker
+      wants on the derivatives market from a client of the initial risk level; off by default).
     - ``bybit``: ``api_key`` (``BYBIT_API_KEY``, required) and ``api_secret`` (``BYBIT_API_SECRET``, required), ``env``
       (``BYBIT_ENV``: ``"mainnet"`` is the default, ``"demo"`` is the demo account with virtual money, ``"testnet"``). The
       demo account has a key pair of its own, read from ``BYBIT_DEMO_API_KEY`` and ``BYBIT_DEMO_API_SECRET``. Also

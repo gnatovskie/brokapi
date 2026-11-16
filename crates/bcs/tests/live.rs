@@ -43,10 +43,12 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// Loads `.env`, reads the refresh token. `write` = the trade token round trip.
+/// Loads `.env`, reads the refresh token. `write` = the trade token round trip. A read test keeps the kind of
+/// token `.env` names (`BCS_IS_WRITE`): BCS refuses a trade token asked for as a read one ("Token client and
+/// authorized client don't match"), and a read test places nothing with either kind.
 fn config(write: bool) -> BcsConfig {
     let cfg = BcsConfig::from_env().expect("BCS_REFRESH_TOKEN in .env");
-    cfg.with_write(write)
+    if write { cfg.with_write(true) } else { cfg }
 }
 
 fn limiter() -> Arc<BrokerLimiter> {
@@ -251,10 +253,15 @@ async fn live_ud_portfolio_and_reconcile_read_only() {
     ud.subscribe_portfolio(SubscribeOpts::lossless(64))
         .await
         .expect("subscribe_portfolio");
-    next(&mut rx, "portfolio update", |e| {
-        matches!(e, Event::Portfolio(_))
-    })
-    .await;
+    // An empty account has nothing to send: BCS returns an empty portfolio and the stream stays quiet.
+    if p.balances.is_empty() && p.positions.is_empty() {
+        println!("portfolio stream: not waited for, the account is empty");
+    } else {
+        next(&mut rx, "portfolio update", |e| {
+            matches!(e, Event::Portfolio(_))
+        })
+        .await;
+    }
     ud.subscribe_order_state()
         .await
         .expect("subscribe_order_state");

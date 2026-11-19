@@ -433,6 +433,19 @@ fn now_secs() -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
+/// Takes one from a counter of prepared failures, true if it was above zero. A `compare_exchange` loop:
+/// `fetch_update` is deprecated on new Rust and `try_update` is not on the minimum version.
+fn take_one(counter: &AtomicU32) -> bool {
+    let mut n = counter.load(Ordering::SeqCst);
+    while n > 0 {
+        match counter.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => n = now,
+        }
+    }
+    false
+}
+
 /// The `n`-th book of a burst: the recorded numbers moved by `n` steps, or the levels around the price a test set.
 fn book_msg(i: &Inst, depth: i32, n: u32, price: Option<Decimal>) -> pb::OrderBook {
     let step = Decimal::from(n) * dec!(0.01);
@@ -502,11 +515,7 @@ impl MarketDataService for Mock {
                 .lock()
                 .unwrap()
                 .push((r.interval, from, to));
-            if opts
-                .candle_network_failures
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok()
-            {
+            if take_one(&opts.candle_network_failures) {
                 return Err(Status::unavailable("mock: candle read failed"));
             }
             match opts.candle_fail.load(Ordering::Relaxed) {

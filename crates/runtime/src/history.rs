@@ -297,6 +297,19 @@ mod tests {
 
     use super::*;
 
+    /// Takes one from a counter of prepared failures, true if it was above zero. A `compare_exchange` loop:
+    /// `fetch_update` is deprecated on new Rust and `try_update` is not on the minimum version.
+    fn take_one(counter: &AtomicU32) -> bool {
+        let mut n = counter.load(Ordering::SeqCst);
+        while n > 0 {
+            match counter.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return true,
+                Err(now) => n = now,
+            }
+        }
+        false
+    }
+
     /// A source with one bar per hour, a rate limit on the first calls and an optional window cap.
     struct Fake {
         calls: Mutex<Vec<TimeRange>>,
@@ -380,20 +393,12 @@ mod tests {
                     });
                 }
             }
-            if self
-                .rate_limited_first
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok()
-            {
+            if take_one(&self.rate_limited_first) {
                 return Err(Error::RateLimited {
                     retry_after: Duration::from_millis(5),
                 });
             }
-            if self
-                .transport_first
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok()
-            {
+            if take_one(&self.transport_first) {
                 return Err(Error::Transport(brokapi_core::TransportError::Message(
                     "reset".into(),
                 )));

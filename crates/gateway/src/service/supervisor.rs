@@ -560,6 +560,9 @@ async fn fetch_health(
 }
 
 /// The text of a log line of the level ERROR or WARN: "2026-10-23T10:00:00.123456Z  WARN text" gives "text".
+///
+/// The source of the line (`brokapi_bcs::ud:`) and its spans (`connector{broker=bcs}:`) stand before the text and
+/// are left out: the reason is read by a person. Lines of older versions have neither.
 fn problem_of(line: &str) -> Option<String> {
     let mut words = line.split_whitespace();
     let _time = words.next()?;
@@ -568,7 +571,29 @@ fn problem_of(line: &str) -> Option<String> {
         return None;
     }
     let at = line.find(level)? + level.len();
-    Some(line[at..].trim().to_owned())
+    let mut text = line[at..].trim_start();
+    while let Some(rest) = skip_source(text) {
+        text = rest.trim_start();
+    }
+    Some(text.trim().to_owned())
+}
+
+/// The text after one span (`name{field=value ...}:`) or one source (`brokapi_bcs::ud:`) at its start.
+fn skip_source(text: &str) -> Option<&str> {
+    let name_end = text
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+        .unwrap_or(text.len());
+    let name = &text[..name_end];
+    let after = &text[name_end..];
+    if name.is_empty() {
+        return None;
+    }
+    if after.starts_with('{') {
+        let close = after.find("}:")?;
+        return Some(&after[close + 2..]);
+    }
+    let source = name.strip_suffix(':')?;
+    (source.contains("::") || source.starts_with("brokapi")).then_some(after)
 }
 
 impl Runner {
@@ -880,5 +905,35 @@ mod tests {
             None
         );
         assert_eq!(problem_of(""), None);
+    }
+
+    #[test]
+    fn the_source_and_the_spans_of_a_line_are_left_out() {
+        assert_eq!(
+            problem_of(
+                "2026-11-20T10:00:00.000000Z  WARN brokapi_gateway::server: the token is refused"
+            )
+            .as_deref(),
+            Some("the token is refused")
+        );
+        assert_eq!(
+            problem_of(
+                "2026-11-20T10:00:00.000000Z ERROR connector{broker=bcs role=ud}: brokapi_bcs::ud: stream lost"
+            )
+            .as_deref(),
+            Some("stream lost")
+        );
+        assert_eq!(
+            problem_of(
+                "2026-11-20T10:00:00.000000Z  WARN connector{broker=bcs}:op{op=place cid=c1}: brokapi_runtime::orders: order unknown"
+            )
+            .as_deref(),
+            Some("order unknown")
+        );
+        assert_eq!(
+            problem_of("2026-11-20T10:00:00.000000Z ERROR brokapi: panic: index out of bounds")
+                .as_deref(),
+            Some("panic: index out of bounds")
+        );
     }
 }

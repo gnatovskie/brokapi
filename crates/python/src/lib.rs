@@ -32,6 +32,18 @@ fn log_error_samples() -> Vec<(String, String)> {
     errors::log_samples()
 }
 
+/// Turns the log of the library on, to stderr (`brokapi::logging::init`). `True` if this call did it, `False` if the
+/// process already had a log. A level or directives that cannot be read raise `ValueError`.
+#[pyfunction]
+#[pyo3(signature = (level=None))]
+fn enable_logging(level: Option<&str>) -> PyResult<bool> {
+    match brokapi::logging::init(level) {
+        Ok(()) => Ok(true),
+        Err(brokapi::logging::Error::AlreadySet) => Ok(false),
+        Err(e) => Err(pyo3::exceptions::PyValueError::new_err(e.to_string())),
+    }
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     runtime::install(m)?;
@@ -47,6 +59,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<record::NativeReplay>()?;
     m.add_function(wrap_pyfunction!(error_samples, m)?)?;
     m.add_function(wrap_pyfunction!(log_error_samples, m)?)?;
+    m.add_function(wrap_pyfunction!(enable_logging, m)?)?;
     m.add("TESTING", cfg!(feature = "testing"))?;
     m.add("CORE_VERSION", env!("CARGO_PKG_VERSION"))?;
     #[cfg(feature = "testing")]

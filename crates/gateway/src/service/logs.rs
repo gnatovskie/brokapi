@@ -124,26 +124,24 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
     }
 }
 
-/// The level from the variable `BROKAPI_LOG` (`error`, `warn`, `info`, `debug`, `trace`), `info` if it is not set.
-fn level() -> tracing_subscriber::filter::LevelFilter {
-    std::env::var("BROKAPI_LOG")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(tracing_subscriber::filter::LevelFilter::INFO)
-}
-
 /// Sets up the log of this process. Panics are written to it too, so a gateway that dies of one leaves the reason.
 /// Called once; a second call does nothing.
+///
+/// The level is that of the library: the variable `BROKAPI_LOG` (a level or directives per module,
+/// `info,brokapi_bcs=debug`), `info` if it is not set or cannot be read. Every line shows the module that wrote it.
 pub fn init(file: Option<(&Path, &LogPolicy)>, stderr: bool) -> std::io::Result<()> {
     let file = match file {
         Some((path, policy)) => Some(Arc::new(Mutex::new(RotatingFile::open(path, policy)?))),
         None => None,
     };
     let sink = Sink { file, stderr };
+    // `None`: no argument, so a wrong variable falls back to `info` and this cannot fail.
+    let filter = brokapi::logging::filter(None)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(brokapi::logging::DEFAULT));
     let set = tracing_subscriber::fmt()
         .with_writer(sink)
-        .with_max_level(level())
-        .with_target(false)
+        .with_env_filter(filter)
+        .with_target(true)
         .with_ansi(false)
         .try_init();
     if set.is_ok() {

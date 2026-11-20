@@ -18,6 +18,7 @@
 //! | `finam` | Finam connectors; `finam::protocol` is the gRPC client | `finam` |
 //! | `alor` | ALOR connectors; `alor::protocol` is the HTTP and WebSocket client | `alor` |
 //! | `bybit` | Bybit connectors; `bybit::protocol` is the HTTP and WebSocket client | `bybit` |
+//! | `logging` | `logging::init`: the log to stderr, the level from `BROKAPI_LOG` | `logging` |
 //!
 //! The guide and the rules for orders are in the book:
 //! <https://brokapi.ru/docs/>. The stage is open alpha: the interface can change before the beta. Before you trade with real
@@ -38,6 +39,9 @@
 pub use brokapi_core as core;
 pub use brokapi_runtime as runtime;
 pub use brokapi_sansio as sansio;
+
+#[cfg(feature = "logging")]
+pub mod logging;
 
 /// BCS connectors and the BCS wire client.
 #[cfg(feature = "bcs")]

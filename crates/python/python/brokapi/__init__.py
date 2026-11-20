@@ -115,6 +115,7 @@ from .models import (
     UserDataCaps,
 )
 from .numbers import RoundMode, round_to_step
+from . import _native as _native_module
 
 try:
     # The one number of the library is `version` in [workspace.package] of Cargo.toml; maturin writes it into the metadata of the package.
@@ -196,6 +197,7 @@ __all__ = [
     "Unsupported",
     "UserDataCaps",
     "connect",
+    "enable_logging",
     "open_tbank_sandbox_account",
     "connect_gateway",
     "errors",
@@ -207,3 +209,21 @@ __all__ = [
     "round_to_step",
     "testing",
 ]
+
+
+def enable_logging(level: str | None = None) -> bool:
+    """Turns the log of the library on: lines of the Rust core to stderr, the level ``info`` by default.
+
+    ``level`` is a level (``"debug"``) or directives per module (``"info,brokapi_bcs=debug"``). Without it the variable
+    ``BROKAPI_LOG`` is read, then ``info``. Every line names the module that wrote it. Call it once, before
+    ``connect``. Returns ``True`` if this call turned the log on, ``False`` if it was already on.
+
+    Raises :class:`ValueError` if ``level`` cannot be read.
+
+    >>> import brokapi
+    >>> brokapi.enable_logging("loud")  # doctest: +ELLIPSIS
+    Traceback (most recent call last):
+    ...
+    ValueError: bad log directive "loud": ...
+    """
+    return _native_module.enable_logging(level)

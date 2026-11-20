@@ -12,6 +12,7 @@ members = [
     "crates/core",
     "crates/sansio",
     "crates/runtime",
+    "crates/redact",
     "crates/bcs",
     "crates/tbank",
     "crates/client",
@@ -71,6 +72,7 @@ brokapi-finam = { path = "crates/finam", version = "0.1.0-alpha.10" }
 brokapi-core = { path = "crates/core", version = "0.1.0-alpha.10" }
 brokapi-sansio = { path = "crates/sansio", version = "0.1.0-alpha.10" }
 brokapi-runtime = { path = "crates/runtime", version = "0.1.0-alpha.10" }
+brokapi-redact = { path = "crates/redact", version = "0.1.0-alpha.10" }
 brokapi-bcs = { path = "crates/bcs", version = "0.1.0-alpha.10" }
 brokapi-tbank-protocol = { path = "crates/tbank-protocol", version = "0.1.0-alpha.10" }
 brokapi-tbank = { path = "crates/tbank", version = "0.1.0-alpha.10" }

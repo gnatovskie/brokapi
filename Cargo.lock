@@ -302,6 +302,7 @@ version = "0.1.0-alpha.10"
 dependencies = [
  "base64",
  "brokapi-mocks",
+ "brokapi-redact",
  "chrono",
  "dotenvy",
  "futures-util",
@@ -480,6 +481,7 @@ dependencies = [
  "brokapi-core",
  "brokapi-finam-protocol",
  "brokapi-mocks",
+ "brokapi-redact",
  "brokapi-runtime",
  "brokapi-sansio",
  "chrono",
@@ -556,6 +558,7 @@ dependencies = [
  "brokapi-conformance",
  "brokapi-core",
  "brokapi-finam-protocol",
+ "brokapi-redact",
  "brokapi-runtime",
  "brokapi-tbank-protocol",
  "chrono",
@@ -570,6 +573,13 @@ dependencies = [
  "tokio-util",
  "tonic",
  "uuid",
+]
+
+[[package]]
+name = "brokapi-redact"
+version = "0.1.0-alpha.10"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -625,6 +635,7 @@ version = "0.1.0-alpha.10"
 dependencies = [
  "base64",
  "brokapi-mocks",
+ "brokapi-redact",
  "dotenvy",
  "proptest",
  "prost",

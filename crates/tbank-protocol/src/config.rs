@@ -12,8 +12,11 @@
 //!     .with_request_timeout(Duration::from_secs(10));
 //! assert_eq!(cfg.endpoint, SANDBOX_ENDPOINT);
 //! assert!(cfg.sandbox);
-//! // The token never shows in `Debug` output.
-//! assert!(!format!("{cfg:?}").contains("t.my-token"));
+//! // The token never shows in `Debug` output, the account shows as a mask.
+//! let text = format!("{cfg:?}");
+//! assert!(!text.contains("t.my-token"));
+//! assert!(!text.contains("2000123456"));
+//! assert!(text.contains("****3456"));
 //! ```
 
 use std::fmt;
@@ -351,7 +354,10 @@ impl fmt::Debug for TbankConfig {
             .field("token", &"<redacted>")
             .field("endpoint", &self.endpoint)
             .field("sandbox", &self.sandbox)
-            .field("account_id", &self.account_id)
+            .field(
+                "account_id",
+                &self.account_id.as_deref().map(brokapi_redact::mask_account),
+            )
             .field("app_name", &self.app_name)
             .field("request_timeout", &self.request_timeout)
             .field("root_certificate", &self.root_certificate_pem.is_some())

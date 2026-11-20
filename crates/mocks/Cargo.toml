@@ -21,6 +21,7 @@ brokapi-bybit-protocol.workspace = true
 # dev-dependency that publishing drops. Moves with the version of the workspace (tests/version_sync.rs).
 brokapi-conformance = { path = "../conformance", version = "0.1.0-alpha.10" }
 brokapi-core.workspace = true
+brokapi-redact.workspace = true
 chrono.workspace = true
 brokapi-finam-protocol.workspace = true
 futures-util.workspace = true

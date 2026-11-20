@@ -113,7 +113,7 @@ pub struct BybitConfig {
 impl std::fmt::Debug for BybitConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BybitConfig")
-            .field("api_key", &self.api_key)
+            .field("api_key", &"<redacted>")
             .field("api_secret", &"<redacted>")
             .field("env", &self.env)
             .field("http_base_url", &self.http_base_url)
@@ -316,10 +316,10 @@ mod tests {
     }
 
     #[test]
-    fn the_secret_is_redacted() {
+    fn the_key_and_the_secret_are_redacted() {
         let cfg = BybitConfig::new("the-key", "very-secret-value");
         let text = format!("{cfg:?}");
-        assert!(text.contains("the-key"));
+        assert!(!text.contains("the-key"));
         assert!(!text.contains("very-secret-value"));
     }
 }

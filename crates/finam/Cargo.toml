@@ -14,6 +14,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+brokapi-redact.workspace = true
 async-trait.workspace = true
 brokapi-core.workspace = true
 brokapi-runtime.workspace = true

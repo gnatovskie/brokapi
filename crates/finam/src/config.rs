@@ -12,8 +12,10 @@
 //! let ud = UserDataConfig::new(api, "A12345", "finam-ud-A12345");
 //! assert_eq!(ud.account_id, "A12345");
 //! assert_eq!(&*md.source, "finam-md");
-//! // `{:?}` never prints the secret.
-//! assert!(!format!("{ud:?}").contains("my-api-secret"));
+//! // `{:?}` never prints the secret and shows the account as a mask.
+//! let text = format!("{ud:?}");
+//! assert!(!text.contains("my-api-secret"));
+//! assert!(text.contains(r#"account_id: "****2345""#));
 //! ```
 
 use std::fmt;
@@ -188,7 +190,9 @@ impl MarketDataConfig {
 /// User data connector config: one connector = one account.
 ///
 /// Used with [`UserDataConnector::start`](crate::UserDataConnector::start).
-#[derive(Debug, Clone)]
+///
+/// The `Debug` output hides the secret and shows the account as a mask (`****2345`).
+#[derive(Clone)]
 pub struct UserDataConfig {
     /// Credentials and endpoint.
     pub api: FinamApiConfig,
@@ -242,6 +246,23 @@ impl UserDataConfig {
             )));
         }
         Ok(())
+    }
+}
+
+impl fmt::Debug for UserDataConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UserDataConfig")
+            .field("api", &self.api)
+            .field(
+                "account_id",
+                &brokapi_redact::mask_account(&self.account_id),
+            )
+            .field("source", &self.source)
+            .field("order_state_buffer", &self.order_state_buffer)
+            .field("executions_limit", &self.executions_limit)
+            .field("subscribe_ack_timeout", &self.subscribe_ack_timeout)
+            .field("price_grid", &self.price_grid)
+            .finish()
     }
 }
 

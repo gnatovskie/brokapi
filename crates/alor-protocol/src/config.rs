@@ -30,7 +30,8 @@ pub enum AlorEnv {
 /// account (it lives a year in the production contour and a month in the test one). The broker has no
 /// separate read and trade tokens: the access token made from it reaches everything the account may do.
 ///
-/// The `Debug` output hides the refresh token (`<redacted>`), so a config can be logged.
+/// The `Debug` output hides the refresh token (`<redacted>`) and shows the portfolio as a mask (`****2345`),
+/// so a config can be logged.
 ///
 /// # Examples
 ///
@@ -42,6 +43,10 @@ pub enum AlorEnv {
 /// assert_eq!(cfg.portfolio.as_deref(), Some("D12345"));
 /// assert_eq!(cfg.exchange, "MOEX");
 /// assert_eq!(cfg.request_timeout.as_secs(), 30);
+///
+/// let text = format!("{cfg:?}");
+/// assert!(!text.contains("my-refresh-token"));
+/// assert!(text.contains(r#"portfolio: Some("****2345")"#));
 ///
 /// // The test contour switches all three addresses at once.
 /// let test = cfg.with_env(AlorEnv::Test);
@@ -86,7 +91,10 @@ impl std::fmt::Debug for AlorConfig {
             .field("http_base_url", &self.http_base_url)
             .field("auth_base_url", &self.auth_base_url)
             .field("ws_base_url", &self.ws_base_url)
-            .field("portfolio", &self.portfolio)
+            .field(
+                "portfolio",
+                &self.portfolio.as_deref().map(brokapi_redact::mask_account),
+            )
             .field("exchange", &self.exchange)
             .field("allow_margin", &self.allow_margin)
             .finish()

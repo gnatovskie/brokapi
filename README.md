@@ -38,6 +38,7 @@ pip install brokapi
 |---|---|
 | `brokapi` | главный крейт, реэкспортирует остальные |
 | `brokapi-core`, `brokapi-runtime`, `brokapi-sansio` | типы и трейты, лимиты и сверка, ядро без сети |
+| `brokapi-redact` | что не попадает в лог: маска номера счета, чистка запросов и ответов брокера, с версии 0.1.0-alpha.11 |
 | `brokapi-bcs`, `brokapi-tbank`, `brokapi-finam`, `brokapi-alor`, `brokapi-bybit` | коннекторы |
 | `brokapi-bcs-protocol`, `brokapi-tbank-protocol`, `brokapi-finam-protocol`, `brokapi-alor-protocol`, `brokapi-bybit-protocol` | клиенты протоколов |
 | `brokapi-client` | один счет у любого из пяти брокеров за одним типом: события, лимиты, вызовы по имени (на нем стоит Python) |

@@ -22,7 +22,8 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use tracing::{debug, error, info, warn};
+use tracing::Instrument as _;
+use tracing::{debug, error, info, trace, warn};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -237,16 +238,19 @@ impl WsSession {
         let is_connected = Arc::new(watch::channel(false).0);
         let dropped_events = Arc::new(AtomicU64::new(0));
 
-        let _handle = tokio::spawn(Self::run_loop(
-            channel,
-            (http_client, connect),
-            event_tx,
-            options,
-            subscriptions.clone(),
-            user_rx,
-            is_connected.clone(),
-            dropped_events.clone(),
-        ));
+        let _handle = tokio::spawn(
+            Self::run_loop(
+                channel,
+                (http_client, connect),
+                event_tx,
+                options,
+                subscriptions.clone(),
+                user_rx,
+                is_connected.clone(),
+                dropped_events.clone(),
+            )
+            .in_current_span(),
+        );
 
         Self {
             channel,
@@ -527,7 +531,7 @@ impl WsSession {
             let token = match http_client.get_access_token().await {
                 Ok(t) => t,
                 Err(e) => {
-                    error!("Failed to get token for {:?}: {}", channel, e);
+                    warn!(?channel, error = %e, retry_in_ms = backoff.as_millis() as u64, "no access token for the stream, retrying");
                     sleep(backoff).await;
                     backoff = (backoff * 2).min(backoff_max);
                     continue;
@@ -542,18 +546,18 @@ impl WsSession {
                     if e.to_string().contains("403 Forbidden")
                         || e.to_string().contains("Unauthorized")
                     {
-                        error!("WS {:?} 403 Forbidden - forcing token refresh", channel);
+                        warn!(?channel, "stream refused the token, renewing it");
                         let _ = http_client.refresh_access_token().await;
                     }
 
-                    error!("WS {:?} connect failed: {}", channel, e);
+                    warn!(?channel, error = %e, retry_in_ms = backoff.as_millis() as u64, "stream connect failed, retrying");
                     sleep(backoff).await;
                     backoff = (backoff * 2).min(backoff_max);
                     continue;
                 }
             };
 
-            info!("WS {:?} session established", channel);
+            info!(?channel, "stream connected");
             let connected_at = tokio::time::Instant::now();
             'connection: {
                 let (mut write, mut read) = ws_stream.split();
@@ -566,7 +570,7 @@ impl WsSession {
                 if options.announce_connects
                     && event_tx.send(IncomingMessage::Reconnected).await.is_err()
                 {
-                    info!("Event channel closed for {:?}", channel);
+                    debug!(?channel, "receiver gone, stream stopped");
                     break 'session;
                 }
 
@@ -579,18 +583,18 @@ impl WsSession {
                         match serde_json::to_string(outgoing) {
                             Ok(json) => {
                                 if write.send(Message::Text(json.into())).await.is_err() {
-                                    error!("Failed to restore subscription for {:?}", channel);
+                                    warn!(?channel, "subscriptions not restored, reconnecting");
                                     break 'connection;
                                 }
                                 restored.insert(*seq);
                             }
                             Err(e) => {
-                                error!("Failed to serialize subscription for {:?}: {}", channel, e);
+                                error!(?channel, error = %e, "subscription cannot be written, not restored");
                             }
                         }
                     }
                     if !subs.is_empty() {
-                        info!("Restored {} subscriptions for {:?}", subs.len(), channel);
+                        info!(?channel, count = subs.len(), "subscriptions restored");
                     }
                 }
 
@@ -606,46 +610,44 @@ impl WsSession {
                         frame = read.next() => {
                             match frame {
                                 Some(Ok(Message::Text(text))) => {
+                                    trace!(?channel, frame = %brokapi_redact::scrub_body(&text), "frame");
                                     let incoming = parse_incoming(&text, channel);
                                     match event_tx.try_send(incoming) {
                                         Ok(true) => {}
                                         Ok(false) => {
                                             dropped_events.fetch_add(1, Ordering::Relaxed);
-                                            warn!(
-                                                "WS {:?} downstream full — dropping parsed frame",
-                                                channel
-                                            );
+                                            warn!(?channel, "receiving channel full, frame dropped");
                                         }
                                         Err(_) => {
-                                            info!("Event channel closed for {:?}", channel);
+                                            debug!(?channel, "receiver gone, stream stopped");
                                             break 'session;
                                         }
                                     }
                                 }
                                 Some(Ok(Message::Close(_))) => {
-                                    info!("WS {:?} closed by server", channel);
+                                    debug!(?channel, "stream closed by the broker");
                                     break 'inner_session;
                                 }
                                 Some(Ok(Message::Pong(_))) => {
                                     last_pong = time::Instant::now();
-                                    info!("WS {:?} received pong", channel);
+                                    debug!(?channel, "pong received");
                                 }
                                 Some(Ok(Message::Ping(data))) => {
                                     last_pong = time::Instant::now();
                                     if write.send(Message::Pong(data)).await.is_err() {
-                                        error!("WS {:?} failed to send pong", channel);
+                                        warn!(?channel, "pong not sent, reconnecting");
                                         break 'inner_session;
                                     }
                                 }
                                 Some(Ok(_)) => {
-                                    warn!("WS {:?} received unknown message", channel);
+                                    debug!(?channel, "frame of an unknown kind ignored");
                                 }
                                 Some(Err(e)) => {
-                                    error!("WS {:?} read error: {}", channel, e);
+                                    warn!(?channel, error = %e, "stream read failed");
                                     break 'inner_session;
                                 }
                                 None => {
-                                    info!("WS {:?} stream ended", channel);
+                                    debug!(?channel, "stream ended");
                                     break 'inner_session;
                                 }
                             }
@@ -655,16 +657,16 @@ impl WsSession {
                         _ = heartbeat.tick() => {
                             let elapsed = last_pong.elapsed();
                             if elapsed > WS_PONG_TIMEOUT {
-                                error!("Pong timeout for {:?} ({:?}), reconnect", channel, elapsed);
+                                warn!(?channel, silence_ms = elapsed.as_millis() as u64, "no pong in time, reconnecting");
                                 break 'inner_session;
                             }
 
 
                             if write.send(Message::Ping(vec![].into())).await.is_err() {
-                                error!("Failed to send Ping frame");
+                                warn!(?channel, "ping not sent, reconnecting");
                                 break 'inner_session;
                             }
-                            debug!("WS {:?} → Ping frame sent", channel);
+                            debug!(?channel, "ping sent");
                         }
 
                         // Исходящие сообщения от юзера (подписки и т.д.)
@@ -673,7 +675,7 @@ impl WsSession {
                                 Ok(Queued { seq, outgoing }) => {
                                     // Фильтрация: Subscribe/Unsubscribe только для MarketData
                                     if channel != BcsWsChannel::MarketData {
-                                        warn!("WS {:?} ignoring subscribe message for non-MarketData channel", channel);
+                                        debug!(?channel, "subscribe request for a channel without subscriptions ignored");
                                         continue 'inner_session;
                                     }
                                     // Эта подписка уже ушла вместе со списком при подключении.
@@ -683,12 +685,12 @@ impl WsSession {
                                     match serde_json::to_string(&outgoing) {
                                         Ok(json) => {
                                             if write.send(Message::Text(json.into())).await.is_err() {
-                                                error!("WS {:?} write error", channel);
+                                                warn!(?channel, "stream write failed, reconnecting");
                                                 break 'inner_session;
                                             }
                                         }
                                         Err(e) => {
-                                            error!("WS {:?} serialize error: {}", channel, e);
+                                            error!(?channel, error = %e, "request cannot be written, not sent");
                                         }
                                     }
                                 }
@@ -707,8 +709,9 @@ impl WsSession {
                 backoff = backoff_min;
             }
             warn!(
-                "WS {:?} disconnected, reconnecting in {:?}...",
-                channel, backoff
+                ?channel,
+                retry_in_ms = backoff.as_millis() as u64,
+                "stream lost, reconnecting"
             );
             sleep(backoff).await;
             backoff = (backoff * 2).min(backoff_max);
@@ -742,11 +745,7 @@ impl WsSession {
                 message: format!("WebSocket connection failed internally: {}", e),
             })?;
 
-        info!(
-            "WebSocket connected to {} with status <{}>",
-            url,
-            res.status()
-        );
+        debug!(%url, status = res.status().as_u16(), "stream handshake done");
         Ok(stream)
     }
 }

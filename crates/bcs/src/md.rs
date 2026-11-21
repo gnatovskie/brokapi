@@ -25,6 +25,7 @@ use brokapi_sansio::{BrokerCore, DesiredSubscription, SubscriptionKind, Subscrip
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::config::MarketDataConfig;
 use crate::core::MdCore;
@@ -45,6 +46,8 @@ const KIND_PAGE_SIZE: u32 = 100;
 const MAX_KIND_PAGES: u32 = 200;
 
 struct MdShared {
+    /// `connector{broker, role}`: the tasks run in it, the commands take it as the parent.
+    span: tracing::Span,
     http: BcsHttpClient,
     ws: WsSession,
     limiter: Arc<BrokerLimiter>,
@@ -167,6 +170,15 @@ impl MarketDataConnector {
         limiter: Arc<BrokerLimiter>,
         out: mpsc::Sender<Envelope>,
     ) -> Result<Self, Error> {
+        let span = brokapi_runtime::spans::connector("bcs", brokapi_runtime::spans::Role::Md, None);
+        Self::start_in(cfg, limiter, out).instrument(span).await
+    }
+
+    async fn start_in(
+        cfg: MarketDataConfig,
+        limiter: Arc<BrokerLimiter>,
+        out: mpsc::Sender<Envelope>,
+    ) -> Result<Self, Error> {
         let ws_client = BcsWsClient::new(cfg.bcs.clone())
             .map_err(map_config_err)?
             .with_options(cfg.ws_options());
@@ -183,6 +195,7 @@ impl MarketDataConnector {
         let emitter = Emitter::new(Arc::clone(&cfg.source), out);
 
         let inner = Arc::new(MdShared {
+            span: tracing::Span::current(),
             http: ws_client.http_client().clone(),
             ws,
             limiter,
@@ -194,7 +207,8 @@ impl MarketDataConnector {
             ack_timeout: cfg.subscribe_ack_timeout,
         });
 
-        let pump = tokio::spawn(run_md_pump(core, emitter, event_rx, cancel));
+        let pump = tokio::spawn(run_md_pump(core, emitter, event_rx, cancel).in_current_span());
+        brokapi_runtime::spans::started();
 
         Ok(Self { inner, pump })
     }
@@ -319,6 +333,17 @@ impl MarketDataConnector {
     /// # }
     /// ```
     pub async fn shutdown(self, mode: ShutdownMode) -> ShutdownReport {
+        let span = self.inner.span.clone();
+        async move {
+            let report = self.shutdown_in(mode).await;
+            brokapi_runtime::spans::stopped(&report);
+            report
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn shutdown_in(self, mode: ShutdownMode) -> ShutdownReport {
         let mut unsubscribed = 0usize;
         let mut unsubscribe_failed = 0usize;
 
@@ -380,51 +405,60 @@ impl MarketDataConnector {
         opts: SubscribeOpts,
         ws: MarketDataSubscribe,
     ) -> Result<SubscriptionId, Error> {
-        let id = self.inner.sub_ids.next();
-        self.inner
-            .emitter
-            .register(id, Some(instrument.clone()), opts.backpressure);
-        // The core attributes incoming data to this subscription (Envelope::sub, backpressure).
-        // It is told before the WS subscribe, so the success ack cannot overtake it.
-        self.set_core_sub(id, Some(core_kind)).await;
-        let notify = self.inner.core.lock().await.notifier();
-        if let Err(e) = self.inner.ws.subscribe(ws.clone()).await {
-            self.set_core_sub(id, None).await;
-            self.inner.emitter.unregister(id);
-            return Err(map_err(e));
-        }
-        // Returns when the broker has confirmed the subscription: what happens after that is delivered. A
-        // subscription that is refused or not confirmed in time is taken back, nothing stays half open.
-        let confirmed = wait_ack(
-            &self.inner.core,
-            notify,
-            self.inner.ack_timeout,
-            |c: &MdCore| match c.actual_state(id) {
-                Some(crate::core::SubState::Active) => AckState::Confirmed,
-                Some(crate::core::SubState::Failed) => {
-                    AckState::Refused(c.failure(id).unwrap_or_default().to_string())
-                }
-                _ => AckState::Pending,
-            },
-        )
-        .await;
-        if let Err(e) = confirmed {
-            let _ = self.inner.ws.unsubscribe(ws).await;
-            self.set_core_sub(id, None).await;
-            self.inner.emitter.unregister(id);
-            return Err(e);
-        }
-        self.inner.subs.write().await.insert(
-            id,
-            MdSubscription {
-                id,
-                instrument,
-                kind,
-                opts,
-                ws,
-            },
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            Some(&instrument.key),
         );
-        Ok(id)
+        brokapi_runtime::spans::command(span, async move {
+            let id = self.inner.sub_ids.next();
+            self.inner
+                .emitter
+                .register(id, Some(instrument.clone()), opts.backpressure);
+            // The core attributes incoming data to this subscription (Envelope::sub, backpressure).
+            // It is told before the WS subscribe, so the success ack cannot overtake it.
+            self.set_core_sub(id, Some(core_kind)).await;
+            let notify = self.inner.core.lock().await.notifier();
+            if let Err(e) = self.inner.ws.subscribe(ws.clone()).await {
+                self.set_core_sub(id, None).await;
+                self.inner.emitter.unregister(id);
+                return Err(map_err(e));
+            }
+            // Returns when the broker has confirmed the subscription: what happens after that is delivered. A
+            // subscription that is refused or not confirmed in time is taken back, nothing stays half open.
+            let confirmed = wait_ack(
+                &self.inner.core,
+                notify,
+                self.inner.ack_timeout,
+                |c: &MdCore| match c.actual_state(id) {
+                    Some(crate::core::SubState::Active) => AckState::Confirmed,
+                    Some(crate::core::SubState::Failed) => {
+                        AckState::Refused(c.failure(id).unwrap_or_default().to_string())
+                    }
+                    _ => AckState::Pending,
+                },
+            )
+            .await;
+            if let Err(e) = confirmed {
+                let _ = self.inner.ws.unsubscribe(ws).await;
+                self.set_core_sub(id, None).await;
+                self.inner.emitter.unregister(id);
+                return Err(e);
+            }
+            self.inner.subs.write().await.insert(
+                id,
+                MdSubscription {
+                    id,
+                    instrument,
+                    kind,
+                    opts,
+                    ws,
+                },
+            );
+            Ok(id)
+        })
+        .await
     }
 
     /// Adds (`Some`) or removes (`None`) a subscription in the core's desired set.
@@ -462,25 +496,30 @@ impl brokapi_core::Connector for MarketDataConnector {
 #[async_trait]
 impl OrderBookSource for MarketDataConnector {
     async fn order_book(&self, id: &InstrumentId, depth: u32) -> Result<OrderBook, Error> {
-        self.acquire("GetOrderBook").await?;
-        let depth = depth.min(MAX_DEPTH);
-        let req = OrderBookRequest {
-            ticker: ticker(id)?,
-            class_code: class_code(id)?,
-            depth,
-        };
-        let resp = self
-            .inner
-            .http
-            .get_order_book(&req)
-            .await
-            .map_err(map_err)?;
-        match map_rest_order_book(&resp, brokapi_runtime::now()) {
-            brokapi_core::Event::OrderBook(book) => Ok(book),
-            _ => Err(Error::Transport(brokapi_core::TransportError::Message(
-                "order book mapping failed".into(),
-            ))),
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetOrderBook").await?;
+            let depth = depth.min(MAX_DEPTH);
+            let req = OrderBookRequest {
+                ticker: ticker(id)?,
+                class_code: class_code(id)?,
+                depth,
+            };
+            let resp = self
+                .inner
+                .http
+                .get_order_book(&req)
+                .await
+                .map_err(map_err)?;
+            match map_rest_order_book(&resp, brokapi_runtime::now()) {
+                brokapi_core::Event::OrderBook(book) => Ok(book),
+                _ => Err(Error::Transport(brokapi_core::TransportError::Message(
+                    "order book mapping failed".into(),
+                ))),
+            }
         }
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_order_book(
@@ -488,36 +527,50 @@ impl OrderBookSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let depth = opts.depth.unwrap_or(MAX_DEPTH).min(MAX_DEPTH);
-        let key = require_ticker_class(id)?;
-        let ws = MarketDataSubscribe::order_book(vec![key], depth);
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::OrderBook,
-            SubscriptionKind::OrderBook {
-                instrument: id.clone(),
-                depth,
-            },
-            opts,
-            ws,
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let depth = opts.depth.unwrap_or(MAX_DEPTH).min(MAX_DEPTH);
+            let key = require_ticker_class(id)?;
+            let ws = MarketDataSubscribe::order_book(vec![key], depth);
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::OrderBook,
+                SubscriptionKind::OrderBook {
+                    instrument: id.clone(),
+                    depth,
+                },
+                opts,
+                ws,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
     async fn unsubscribe(&self, sub: SubscriptionId) -> Result<(), Error> {
-        let record = self
-            .inner
-            .subs
-            .write()
-            .await
-            .remove(&sub)
-            .ok_or_else(|| Error::Rejected {
-                code: "unknown_subscription".into(),
-                message: format!("subscription {} is not active", sub.value()),
-            })?;
-        self.set_core_sub(sub, None).await;
-        self.inner.emitter.unregister(sub);
-        self.inner.ws.unsubscribe(record.ws).await.map_err(map_err)
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Unsubscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            let record =
+                self.inner
+                    .subs
+                    .write()
+                    .await
+                    .remove(&sub)
+                    .ok_or_else(|| Error::Rejected {
+                        code: "unknown_subscription".into(),
+                        message: format!("subscription {} is not active", sub.value()),
+                    })?;
+            self.set_core_sub(sub, None).await;
+            self.inner.emitter.unregister(sub);
+            self.inner.ws.unsubscribe(record.ws).await.map_err(map_err)
+        })
+        .await
     }
 }
 
@@ -526,29 +579,34 @@ impl MarketDataSource for MarketDataConnector {
     /// `POST /last-trades`: the tape of the current session. The API has no limit, so the newest
     /// `limit` trades are kept here (oldest first). A record without a known side is dropped.
     async fn last_trades(&self, id: &InstrumentId, limit: u32) -> Result<Vec<MarketTrade>, Error> {
-        self.acquire("GetLastTrades").await?;
-        let req = LastTradesRequest {
-            ticker: ticker(id)?,
-            class_code: class_code(id)?,
-            ..Default::default()
-        };
-        let mut resp = self
-            .inner
-            .http
-            .get_last_trades(&req)
-            .await
-            .map_err(map_err)?;
-        // Oldest first; records without a time keep their place (stable sort on a None key).
-        resp.sort_by_key(|t| crate::map::parse_broker_ts(t.date_time.as_deref()));
-        let now = brokapi_runtime::now();
-        let mut trades: Vec<MarketTrade> = resp
-            .iter()
-            .filter_map(|t| map_rest_last_trade(t, id, now))
-            .collect();
-        if trades.len() > limit as usize {
-            trades.drain(..trades.len() - limit as usize);
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetLastTrades").await?;
+            let req = LastTradesRequest {
+                ticker: ticker(id)?,
+                class_code: class_code(id)?,
+                ..Default::default()
+            };
+            let mut resp = self
+                .inner
+                .http
+                .get_last_trades(&req)
+                .await
+                .map_err(map_err)?;
+            // Oldest first; records without a time keep their place (stable sort on a None key).
+            resp.sort_by_key(|t| crate::map::parse_broker_ts(t.date_time.as_deref()));
+            let now = brokapi_runtime::now();
+            let mut trades: Vec<MarketTrade> = resp
+                .iter()
+                .filter_map(|t| map_rest_last_trade(t, id, now))
+                .collect();
+            if trades.len() > limit as usize {
+                trades.drain(..trades.len() - limit as usize);
+            }
+            Ok(trades)
         }
-        Ok(trades)
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_market_trades(
@@ -556,17 +614,22 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let key = require_ticker_class(id)?;
-        let ws = MarketDataSubscribe::last_trades(vec![key]);
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::MarketTrades,
-            SubscriptionKind::LastTrades {
-                instrument: id.clone(),
-            },
-            opts,
-            ws,
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let key = require_ticker_class(id)?;
+            let ws = MarketDataSubscribe::last_trades(vec![key]);
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::MarketTrades,
+                SubscriptionKind::LastTrades {
+                    instrument: id.clone(),
+                },
+                opts,
+                ws,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -575,17 +638,22 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let key = require_ticker_class(id)?;
-        let ws = MarketDataSubscribe::quotes(vec![key]);
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::Quotes,
-            SubscriptionKind::Quotes {
-                instrument: id.clone(),
-            },
-            opts,
-            ws,
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let key = require_ticker_class(id)?;
+            let ws = MarketDataSubscribe::quotes(vec![key]);
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::Quotes,
+                SubscriptionKind::Quotes {
+                    instrument: id.clone(),
+                },
+                opts,
+                ws,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -595,19 +663,24 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         range: TimeRange,
     ) -> Result<Vec<Candle>, Error> {
-        let label = timeframe_label(tf).ok_or(Error::Unsupported {
-            capability: "candles_m10".into(),
-        })?;
-        self.acquire("GetCandles").await?;
-        let req = CandlesRequest {
-            ticker: ticker(id)?,
-            class_code: class_code(id)?,
-            start_date: nanos_to_datetime(range.from),
-            end_date: nanos_to_datetime(range.to),
-            time_frame: label.to_string(),
-        };
-        let resp = self.inner.http.get_candles(&req).await.map_err(map_err)?;
-        Ok(map_rest_candles(&resp, tf, brokapi_runtime::now()))
+        let span = self.inner.span.clone();
+        async move {
+            let label = timeframe_label(tf).ok_or(Error::Unsupported {
+                capability: "candles_m10".into(),
+            })?;
+            self.acquire("GetCandles").await?;
+            let req = CandlesRequest {
+                ticker: ticker(id)?,
+                class_code: class_code(id)?,
+                start_date: nanos_to_datetime(range.from),
+                end_date: nanos_to_datetime(range.to),
+                time_frame: label.to_string(),
+            };
+            let resp = self.inner.http.get_candles(&req).await.map_err(map_err)?;
+            Ok(map_rest_candles(&resp, tf, brokapi_runtime::now()))
+        }
+        .instrument(span)
+        .await
     }
 
     /// One request returns at most 1440 bars (BCS documentation of `candles-chart`), so the span is
@@ -622,21 +695,26 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let label = timeframe_label(tf).ok_or(Error::Unsupported {
-            capability: "candles_m10".into(),
-        })?;
-        let key = require_ticker_class(id)?;
-        let ws = MarketDataSubscribe::last_candle(vec![key], label);
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::Candles,
-            SubscriptionKind::LastCandle {
-                instrument: id.clone(),
-                timeframe: tf,
-            },
-            opts,
-            ws,
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let label = timeframe_label(tf).ok_or(Error::Unsupported {
+                capability: "candles_m10".into(),
+            })?;
+            let key = require_ticker_class(id)?;
+            let ws = MarketDataSubscribe::last_candle(vec![key], label);
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::Candles,
+                SubscriptionKind::LastCandle {
+                    instrument: id.clone(),
+                    timeframe: tf,
+                },
+                opts,
+                ws,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 }
@@ -644,6 +722,8 @@ impl MarketDataSource for MarketDataConnector {
 #[async_trait]
 impl InstrumentSource for MarketDataConnector {
     async fn find(&self, q: InstrumentQuery) -> Result<Vec<Instrument>, Error> {
+        let span = self.inner.span.clone();
+        async move {
         let route = match &q {
             InstrumentQuery::ByTicker { .. } => "GetInstrumentsByTickers",
             InstrumentQuery::ByIsin(_) => "GetInstrumentsByIsins",
@@ -727,37 +807,53 @@ impl InstrumentSource for MarketDataConnector {
                 map_instrument_info(info, &class)
             })
             .collect())
+        }.instrument(span).await
     }
 
     async fn get(&self, id: &InstrumentId) -> Result<Instrument, Error> {
-        let cc = class_code(id)?;
-        let info = self.record_for_board(id, &cc).await?;
-        Ok(map_instrument_info(&info, &cc))
+        let span = self.inner.span.clone();
+        async move {
+            let cc = class_code(id)?;
+            let info = self.record_for_board(id, &cc).await?;
+            Ok(map_instrument_info(&info, &cc))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn trading_params(&self, id: &InstrumentId) -> Result<TradingParams, Error> {
-        let cc = class_code(id)?;
-        let info = self.record_for_board(id, &cc).await?;
-        let snap = info.trading_params_for_board(&cc).ok_or_else(|| {
-            Error::Transport(brokapi_core::TransportError::Message(
-                "trading params unavailable".into(),
-            ))
-        })?;
-        Ok(map_trading_params(&snap))
+        let span = self.inner.span.clone();
+        async move {
+            let cc = class_code(id)?;
+            let info = self.record_for_board(id, &cc).await?;
+            let snap = info.trading_params_for_board(&cc).ok_or_else(|| {
+                Error::Transport(brokapi_core::TransportError::Message(
+                    "trading params unavailable".into(),
+                ))
+            })?;
+            Ok(map_trading_params(&snap))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn trading_status(&self, id: &InstrumentId) -> Result<TradingStatus, Error> {
-        self.acquire("GetTradingStatus").await?;
-        let req = TradingStatusRequest {
-            class_code: class_code(id)?,
-        };
-        let resp = self
-            .inner
-            .http
-            .get_trading_status(&req)
-            .await
-            .map_err(map_err)?;
-        Ok(map_trading_status(&ticker(id)?, &class_code(id)?, &resp))
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetTradingStatus").await?;
+            let req = TradingStatusRequest {
+                class_code: class_code(id)?,
+            };
+            let resp = self
+                .inner
+                .http
+                .get_trading_status(&req)
+                .await
+                .map_err(map_err)?;
+            Ok(map_trading_status(&ticker(id)?, &class_code(id)?, &resp))
+        }
+        .instrument(span)
+        .await
     }
 
     /// `GET /trading-schedule/daily-schedule` needs the instrument (`ticker` and `classCode` are both
@@ -765,32 +861,37 @@ impl InstrumentSource for MarketDataConnector {
     /// (`"SBER@TQBR"`). Anything else is a `Config` error. The answer is for one day, today: the
     /// intervals are put on the day of `range.from` (an assumption, see `map/schedule.rs`).
     async fn schedule(&self, exchange: &str, range: TimeRange) -> Result<Schedule, Error> {
-        let Some((t, c)) = exchange
-            .split_once('@')
-            .filter(|(t, c)| !t.is_empty() && !c.is_empty())
-        else {
-            return Err(Error::Config(brokapi_core::ConfigError::Message(
-                "BCS schedule is per instrument: pass \"TICKER@CLASSCODE\"".into(),
-            )));
-        };
-        self.acquire("GetDailySchedule").await?;
-        let req = DailyScheduleRequest {
-            class_code: c.to_string(),
-            ticker: t.to_string(),
-        };
-        let resp = self
-            .inner
-            .http
-            .get_daily_schedule(&req)
-            .await
-            .map_err(map_err)?;
-        let day = nanos_to_datetime(range.from).date_naive();
-        Ok(map_daily_schedule(
-            exchange,
-            day,
-            &resp,
-            brokapi_runtime::now(),
-        ))
+        let span = self.inner.span.clone();
+        async move {
+            let Some((t, c)) = exchange
+                .split_once('@')
+                .filter(|(t, c)| !t.is_empty() && !c.is_empty())
+            else {
+                return Err(Error::Config(brokapi_core::ConfigError::Message(
+                    "BCS schedule is per instrument: pass \"TICKER@CLASSCODE\"".into(),
+                )));
+            };
+            self.acquire("GetDailySchedule").await?;
+            let req = DailyScheduleRequest {
+                class_code: c.to_string(),
+                ticker: t.to_string(),
+            };
+            let resp = self
+                .inner
+                .http
+                .get_daily_schedule(&req)
+                .await
+                .map_err(map_err)?;
+            let day = nanos_to_datetime(range.from).date_naive();
+            Ok(map_daily_schedule(
+                exchange,
+                day,
+                &resp,
+                brokapi_runtime::now(),
+            ))
+        }
+        .instrument(span)
+        .await
     }
 }
 

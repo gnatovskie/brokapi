@@ -4,10 +4,11 @@
 //! The endpoint-specific methods (`get_order_book`, `create_order`, ...) are in [`super::endpoints`].
 
 use reqwest::Client;
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::config::BcsConfig;
 use crate::error::{ApiErrorResponse, AuthErrorResponse, BcsApiError};
@@ -224,9 +225,9 @@ impl BcsHttpClient {
             client_id: self.client_id.clone(),
         };
 
-        debug!("Refreshing access + refresh token...");
+        debug!("access token renewal started");
 
-        let resp = self.client.post(&url).form(&form).send().await?;
+        let resp = self.client.post(&url).form(&form).send_logged().await?;
 
         if resp.status().is_success() {
             let token_resp: TokenResponse = resp.json().await?;
@@ -238,9 +239,9 @@ impl BcsHttpClient {
                     let mut rt = self.refresh_token.write().await;
                     *rt = new_refresh;
                 }
-                debug!("✅ New refresh_token received and saved from Keycloak");
+                debug!("refresh token rotated");
             } else {
-                debug!("Server did not return new refresh_token (keeping current)");
+                debug!("refresh token kept");
             }
 
             {
@@ -252,12 +253,12 @@ impl BcsHttpClient {
                 });
             }
 
-            debug!("Access token refreshed successfully");
+            debug!("access token renewed");
             Ok(access)
         } else {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
-            error!("Token refresh failed: {} {}", status, body);
+            warn!(status, body = %brokapi_redact::scrub_body(&body), "access token renewal refused");
 
             if let Ok(err) = serde_json::from_str::<AuthErrorResponse>(&body) {
                 Err(BcsApiError::AuthError {
@@ -357,18 +358,21 @@ impl BcsHttpClient {
             .get(&url)
             .bearer_auth(&token)
             .query(query)
-            .send()
+            .send_logged()
             .await?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            warn!("Got 401, refreshing token and retrying...");
+            warn!(
+                status = 401,
+                "token refused, renewing it and repeating the read"
+            );
             let new_token = self.refresh_access_token().await?;
             let resp = self
                 .client
                 .get(&url)
                 .bearer_auth(&new_token)
                 .query(query)
-                .send()
+                .send_logged()
                 .await?;
             self.handle_response(resp).await
         } else {
@@ -409,15 +413,28 @@ impl BcsHttpClient {
         let url = format!("{}{}", self.http_base_url, path);
         let token = self.get_access_token().await?;
 
-        let resp = self.client.get(&url).bearer_auth(&token).send().await?;
+        let resp = self
+            .client
+            .get(&url)
+            .bearer_auth(&token)
+            .send_logged()
+            .await?;
 
         let status = resp.status();
 
         // 401 - обновляем токен и пробуем снова
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            warn!("Got 401, refreshing token and retrying...");
+            warn!(
+                status = 401,
+                "token refused, renewing it and repeating the read"
+            );
             let new_token = self.refresh_access_token().await?;
-            let resp = self.client.get(&url).bearer_auth(&new_token).send().await?;
+            let resp = self
+                .client
+                .get(&url)
+                .bearer_auth(&new_token)
+                .send_logged()
+                .await?;
 
             let status = resp.status();
             let body = resp.text().await?;
@@ -490,10 +507,13 @@ impl BcsHttpClient {
             .post(&url)
             .bearer_auth(&token)
             .json(body)
-            .send()
+            .send_logged()
             .await?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            warn!("Got 401 on a command: renewing the token, the command is not repeated");
+            warn!(
+                status = 401,
+                "token refused on a command, renewing it: the command is not repeated"
+            );
             // The next call needs a fresh token. A failure of the renewal does not hide the 401.
             let _ = self.refresh_access_token().await;
         }
@@ -521,16 +541,19 @@ impl BcsHttpClient {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let resp = req.send().await?;
+        let resp = req.send_logged().await?;
 
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            warn!("Got 401, refreshing token and retrying...");
+            warn!(
+                status = 401,
+                "token refused, renewing it and repeating the read"
+            );
             let new_token = self.refresh_access_token().await?;
             let mut req = self.client.request(method, &url).bearer_auth(&new_token);
             if let Some(b) = body {
                 req = req.json(b);
             }
-            let resp = req.send().await?;
+            let resp = req.send_logged().await?;
             self.handle_response(resp).await
         } else {
             self.handle_response(resp).await
@@ -670,6 +693,32 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// Sends a request and writes it to the log on `debug`: the method and the path (never the query or the body: a read of
+/// orders holds account data), the HTTP status and the time.
+trait SendLogged {
+    fn send_logged(self) -> impl Future<Output = reqwest::Result<reqwest::Response>> + Send;
+}
+
+impl SendLogged for reqwest::RequestBuilder {
+    fn send_logged(self) -> impl Future<Output = reqwest::Result<reqwest::Response>> + Send {
+        let (client, request) = self.build_split();
+        async move {
+            let request = request?;
+            let method = format!("{} {}", request.method(), request.url().path());
+            let started = Instant::now();
+            let result = client.execute(request).await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            match &result {
+                Ok(resp) => {
+                    debug!(%method, status = resp.status().as_u16(), latency_ms, "request done")
+                }
+                Err(e) => debug!(%method, latency_ms, error = %e, "request failed"),
+            }
+            result
+        }
+    }
 }
 
 #[cfg(test)]

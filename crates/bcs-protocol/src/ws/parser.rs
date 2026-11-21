@@ -84,13 +84,7 @@ pub fn parse_incoming(text: &str, service: BcsWsChannel) -> IncomingMessage {
             Err(e) => {
                 // Only the kind and the position of the failure: the frame holds account data and the
                 // message of serde can quote a value.
-                warn!(
-                    "[WS_PARSE] OrderTransaction frame not understood: {:?} at line {} column {}, {} bytes",
-                    e.classify(),
-                    e.line(),
-                    e.column(),
-                    text.len()
-                );
+                warn!(kind = ?e.classify(), line = e.line(), column = e.column(), bytes = text.len(), "order frame not understood, dropped");
             }
         },
         BcsWsChannel::MarginalIndicators => {

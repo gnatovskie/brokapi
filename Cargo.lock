@@ -343,6 +343,7 @@ dependencies = [
  "tokio-test",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -354,6 +355,7 @@ dependencies = [
  "brokapi-conformance",
  "brokapi-core",
  "brokapi-mocks",
+ "brokapi-redact",
  "chrono",
  "dotenvy",
  "futures-util",

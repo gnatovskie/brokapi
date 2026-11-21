@@ -8,6 +8,9 @@ use brokapi_core::{
     StopOrderState, UnixNanos,
 };
 use brokapi_core::{Decimal, dec};
+use brokapi_finam_protocol::pb::google::r#type::Decimal as DecimalPb;
+use brokapi_finam_protocol::pb::grpc::tradeapi::v1;
+use brokapi_finam_protocol::pb::grpc::tradeapi::v1::orders as po;
 use mock_server::{MockServer, sber, ud};
 
 fn stop(
@@ -274,4 +277,122 @@ async fn there_is_no_separate_stop_stream() {
         ud.subscribe_stop_orders().await,
         Err(Error::Unsupported { .. })
     ));
+}
+
+/// What a bot sees when a stop order triggers and fills (live 10.11.2026, a buy stop-loss that the market reached): the
+/// stop is no longer in the list of waiting stops, there is no "triggered" entry and no event about the stop itself. The
+/// fill comes as an ordinary order and an execution under the cid of the stop, `order_state(cid)` says `Filled`, and the
+/// position moves.
+#[tokio::test]
+async fn a_stop_that_triggered_leaves_the_list_and_its_fill_comes_under_its_cid() {
+    use brokapi_core::{Event, ExecutionSource, OrderExecutor, OrderState, TimeRange};
+    let server = MockServer::start().await;
+    let (ud, mut rx) = ud(&server, "ACC1").await;
+    ud.reconcile(&[]).await.unwrap();
+    ud.subscribe_order_state().await.unwrap();
+    ud.subscribe_executions().await.unwrap();
+    let req = stop(Side::Buy, StopOrderKind::StopLoss, dec!(300.0), None);
+    let cid = req.cid;
+    ud.place_stop(req).await.unwrap();
+    assert_eq!(ud.active_stop_orders().await.unwrap().len(), 1);
+    let comment = server
+        .state
+        .orders_of("ACC1")
+        .remove(0)
+        .order
+        .unwrap()
+        .comment;
+    brokapi_mocks::time::wait_until("both streams are open", || {
+        server.state.count_calls("SubscribeTrades") > 0
+            && server
+                .state
+                .order_stream_opens
+                .load(std::sync::atomic::Ordering::SeqCst)
+                > 0
+    })
+    .await;
+
+    // The market reaches the stop. As live: the stop is done, and the broker puts an ordinary market order with the
+    // comment of the stop, which fills.
+    let waiting = server.state.orders_of("ACC1").remove(0);
+    let quantity = Some(DecimalPb { value: "5".into() });
+    let mut done = waiting.clone();
+    done.status = po::OrderStatus::Executed as i32;
+    server.state.push_order("ACC1", done);
+    let child = |status: po::OrderStatus, executed: &str| po::OrderState {
+        order_id: "EXCH1".into(),
+        status: status as i32,
+        order: Some(po::Order {
+            account_id: "ACC1".into(),
+            symbol: "SBER@MISX".into(),
+            quantity: quantity.clone(),
+            side: v1::Side::Buy as i32,
+            r#type: po::OrderType::Market as i32,
+            comment: comment.clone(),
+            ..Default::default()
+        }),
+        initial_quantity: quantity.clone(),
+        executed_quantity: Some(DecimalPb {
+            value: executed.into(),
+        }),
+        remaining_quantity: Some(DecimalPb {
+            value: (5 - executed.parse::<i64>().unwrap()).to_string(),
+        }),
+        ..Default::default()
+    };
+    server
+        .state
+        .push_order("ACC1", child(po::OrderStatus::New, "0"));
+    server.state.push_trade(
+        "ACC1",
+        v1::AccountTrade {
+            trade_id: "T1".into(),
+            symbol: "SBER@MISX".into(),
+            price: Some(DecimalPb {
+                value: "300".into(),
+            }),
+            size: quantity.clone(),
+            side: v1::Side::Buy as i32,
+            order_id: "EXCH1".into(),
+            comment: comment.clone(),
+            account_id: "ACC1".into(),
+            ..Default::default()
+        },
+    );
+    server
+        .state
+        .push_order("ACC1", child(po::OrderStatus::Filled, "5"));
+
+    let filled = brokapi_conformance::next_matching("stop_fired_order", &mut rx, |e| {
+        matches!(&e.payload, Event::Order(o) if o.cid == cid && matches!(o.state, OrderState::Filled { .. }))
+    })
+    .await;
+    assert!(matches!(filled.payload, Event::Order(_)));
+    let exec = brokapi_conformance::next_matching("stop_fired_execution", &mut rx, |e| {
+        matches!(e.payload, Event::Execution(_))
+    })
+    .await;
+    let Event::Execution(x) = exec.payload else {
+        unreachable!()
+    };
+    assert_eq!((x.cid, x.qty.decimal()), (Some(cid), dec!(5)));
+
+    assert!(
+        ud.active_stop_orders().await.unwrap().is_empty(),
+        "a stop that triggered is not a waiting stop"
+    );
+    assert!(ud.active_orders().await.unwrap().is_empty());
+    assert!(matches!(
+        ud.order_state(cid).await.unwrap().state,
+        OrderState::Filled { .. }
+    ));
+    let history = ud
+        .executions(TimeRange::new(
+            UnixNanos::ZERO,
+            UnixNanos::from_nanos(i64::MAX / 2),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].cid, Some(cid));
 }

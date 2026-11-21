@@ -264,6 +264,7 @@ name = "brokapi-bcs-protocol"
 version = "0.1.0-alpha.10"
 dependencies = [
  "anyhow",
+ "brokapi-redact",
  "chrono",
  "dotenvy",
  "futures-util",
@@ -305,6 +306,7 @@ dependencies = [
 name = "brokapi-bybit-protocol"
 version = "0.1.0-alpha.10"
 dependencies = [
+ "brokapi-redact",
  "dotenvy",
  "futures-util",
  "kanal",
@@ -342,7 +344,10 @@ name = "brokapi-conformance"
 version = "0.1.0-alpha.10"
 dependencies = [
  "brokapi-core",
+ "brokapi-redact",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -476,6 +481,7 @@ name = "brokapi-runtime"
 version = "0.1.0-alpha.10"
 dependencies = [
  "brokapi-core",
+ "brokapi-redact",
  "brokapi-sansio",
  "serde",
  "serde_json",
@@ -526,6 +532,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tracing",
 ]
 
 [[package]]

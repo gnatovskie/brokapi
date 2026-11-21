@@ -102,6 +102,9 @@ pub struct MockOptions {
     /// Requests that change an order (`POST` to the order methods) the mock has received, counted when they
     /// arrive, before any delay.
     pub order_commands: AtomicU32,
+    /// The next this many order commands are refused with HTTP 429: the broker's own rate limit.
+    /// The order is not taken, the command is counted in `order_commands` all the same.
+    pub order_commands_limited: std::sync::Mutex<u32>,
     /// The mock holds every order command this many milliseconds before it acts and answers (to provoke a
     /// timeout of the client, or to keep one command in flight while others wait). The clock is the tokio
     /// clock of the test, so `brokapi_mocks::time::jump` ends the wait.
@@ -710,6 +713,13 @@ async fn http_handler(
         && uri.path() != ORDERS_SEARCH_PATH
     {
         state.options.order_commands.fetch_add(1, Ordering::SeqCst);
+        {
+            let mut left = state.options.order_commands_limited.lock().unwrap();
+            if *left > 0 {
+                *left -= 1;
+                return StatusCode::TOO_MANY_REQUESTS.into_response();
+            }
+        }
         let delay = state.options.order_delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
             // The broker takes the order after the delay even if the client gave up waiting and closed the

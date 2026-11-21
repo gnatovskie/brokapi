@@ -793,3 +793,112 @@ async fn a_refusal_before_the_wire_leaves_the_cid_usable() {
 
     ud.shutdown(ShutdownMode::Immediate).await;
 }
+
+/// The broker's own rate limit (HTTP 429) on an order command: `RateLimited`, nothing sent twice, the order of the
+/// command untouched. The book says that after `RateLimited` on a place the safe rule is a new `cid`.
+#[tokio::test]
+async fn a_429_of_the_broker_on_an_order_command_is_rate_limited_and_never_repeated() {
+    let opts = Arc::new(MockOptions::default());
+    let server = MockServer::start(Arc::clone(&opts)).await;
+    let (ud, _rx) = ud(&server).await;
+    let commands = || opts.order_commands.load(Ordering::SeqCst);
+
+    // Place: refused, the order does not exist, the library did not send it a second time.
+    *opts.order_commands_limited.lock().unwrap() = 1;
+    let req = limit_buy(dec!(100.0));
+    let spent = req.cid;
+    match ud.place(req.clone()).await {
+        Err(Error::RateLimited { retry_after }) => assert!(retry_after >= Duration::from_secs(1)),
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+    assert_eq!(commands(), 1, "the library sent the place once");
+    assert!(ud.active_orders().await.unwrap().is_empty());
+    // The same cid is spent (the broker may have seen it), a new one goes through.
+    match ud.place(req).await {
+        Err(Error::Rejected { code, .. }) => assert_eq!(code, "duplicate_place"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(commands(), 1, "the repeat never reached the broker");
+    let again = limit_buy(dec!(100.0));
+    let cid = again.cid;
+    assert_ne!(cid, spent);
+    ud.place(again).await.expect("a new cid after RateLimited");
+    assert_eq!(ud.active_orders().await.unwrap().len(), 1);
+
+    // Cancel: refused, the order stands and is still an acknowledged order, and a second try cancels it.
+    *opts.order_commands_limited.lock().unwrap() = 1;
+    let before = commands();
+    assert!(matches!(
+        ud.cancel(cid).await,
+        Err(Error::RateLimited { .. })
+    ));
+    assert_eq!(commands(), before + 1, "the cancel was sent once");
+    assert!(matches!(
+        ud.order_state(cid).await.unwrap().state,
+        OrderState::Acked { .. }
+    ));
+    ud.cancel(cid).await.expect("the cancel after the limit");
+    assert!(ud.active_orders().await.unwrap().is_empty());
+
+    // Replace: refused, the original keeps its price, the replace with a new cid moves it.
+    let base = limit_buy(dec!(100.0));
+    let base_cid = base.cid;
+    ud.place(base).await.unwrap();
+    *opts.order_commands_limited.lock().unwrap() = 1;
+    let moved = |cid, price| ReplaceOrderRequest {
+        cid,
+        original_cid: base_cid,
+        qty: None,
+        price: Some(Price::from(price)),
+    };
+    assert!(matches!(
+        ud.replace(moved(ClientOrderId::new_v4(), 101)).await,
+        Err(Error::RateLimited { .. })
+    ));
+    let snap = ud.order_state(base_cid).await.unwrap();
+    assert_eq!(snap.price.map(|p| p.decimal()), Some(dec!(100.0)));
+    assert!(matches!(snap.state, OrderState::Acked { .. }));
+    let replaced = ClientOrderId::new_v4();
+    ud.replace(moved(replaced, 102))
+        .await
+        .expect("replace after the limit");
+    assert_eq!(
+        ud.order_state(replaced)
+            .await
+            .unwrap()
+            .price
+            .map(|p| p.decimal()),
+        Some(dec!(102.0))
+    );
+    ud.shutdown(ShutdownMode::Immediate).await;
+}
+
+/// A partly filled order is replaced with the quantity the caller gives, as given: the docs do not say whether the
+/// edit's quantity is the total or the rest, so the connector sends the number as it is and does not subtract.
+#[tokio::test]
+async fn replace_of_a_partly_filled_order_sends_the_quantity_as_given() {
+    let server = MockServer::start(Arc::new(MockOptions::default())).await;
+    let (ud, _rx) = ud(&server).await;
+    let req = limit_buy(dec!(100.0));
+    let cid = req.cid;
+    ud.place(req).await.unwrap();
+    server.fill(
+        &cid.hyphenated().to_string(),
+        Qty::from(4),
+        Price::from(100),
+    );
+
+    let new = ClientOrderId::new_v4();
+    ud.replace(ReplaceOrderRequest {
+        cid: new,
+        original_cid: cid,
+        qty: Some(Qty::from(6)),
+        price: Some(Price::from(101)),
+    })
+    .await
+    .expect("replace of a partly filled order with a quantity");
+    let snap = ud.order_state(new).await.unwrap();
+    assert_eq!(snap.qty.decimal(), dec!(6.0));
+    assert_eq!(snap.price.map(|p| p.decimal()), Some(dec!(101.0)));
+    ud.shutdown(ShutdownMode::Immediate).await;
+}

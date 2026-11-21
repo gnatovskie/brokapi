@@ -487,3 +487,87 @@ async fn logs() {
     )
     .await;
 }
+
+/// A fill that happens while the order events socket is down never reaches the bot as an event. What the bot does
+/// after `Event::Reconnected` finds it: `reconcile` says the order is no longer active, `order_state` says it is
+/// filled, `executions` has the fill. And the new socket carries the events of the orders that come after.
+#[tokio::test]
+async fn a_fill_lost_in_the_gap_of_the_order_events_is_found_after_the_reconnect() {
+    use brokapi_core::{
+        ClientOrderId, Event, ExecutionSource, OrderExecutor, OrderState, OrderType,
+        PlaceOrderRequest, Side,
+    };
+    let opts = Arc::new(MockOptions::default());
+    let (server, ud, mut rx) = ud_with(&opts, None).await;
+    conf::reconcile(&ud).await;
+    brokapi_mocks::time::wait_until("order events socket connected", || opts.event_sockets() > 0)
+        .await;
+    ud.subscribe_order_state().await.unwrap();
+    ud.subscribe_executions().await.unwrap();
+    let order = |price: Decimal| PlaceOrderRequest {
+        cid: ClientOrderId::new_v4(),
+        instrument: sber(),
+        side: Side::Buy,
+        order_type: OrderType::Limit,
+        qty: conf::lots(1),
+        price: Some(Price::new(price)),
+    };
+    let first = order(dec!(100.0));
+    let cid = first.cid;
+    let broker_id = ud.place(first).await.unwrap().broker_id;
+
+    // The socket goes down, and only when it is gone the broker fills the order: nobody is told.
+    let before = opts.ws_connections();
+    server.cut_event_sockets();
+    brokapi_mocks::time::wait_until("the socket is down", || opts.event_sockets() == 0).await;
+    server.fill(
+        &cid.hyphenated().to_string(),
+        conf::lots(1),
+        Price::from(100),
+    );
+    brokapi_mocks::time::jump_until("the socket is back", Duration::from_secs(1), || {
+        opts.ws_connections() > before
+    })
+    .await;
+    conf::next_matching("a_fill_lost_in_the_gap", &mut rx, |e| {
+        matches!(e.payload, Event::Reconnected { .. })
+    })
+    .await;
+
+    let report = ud.reconcile(&[cid]).await.unwrap();
+    assert_eq!(report.closed_offline, vec![cid], "{report:?}");
+    assert!(matches!(
+        ud.order_state(cid).await.unwrap().state,
+        OrderState::Filled { .. }
+    ));
+    let fills = ud
+        .executions(TimeRange::new(
+            UnixNanos::from_nanos(0),
+            UnixNanos::from_nanos(i64::MAX / 4),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(fills.len(), 1, "{fills:?}");
+    // The history of BCS has no client id (the docs of `trades/search`): the fill is tied to the order by its number.
+    assert_eq!(fills[0].cid, None);
+    // And by the number only: the history gives the bare order number (`orderNum`), the order has the whole id
+    // (`date-board-number`), so the two are joined by the end of the id.
+    assert!(
+        broker_id
+            .as_str()
+            .ends_with(fills[0].broker_order_id.as_str()),
+        "{broker_id:?} vs {:?}",
+        fills[0].broker_order_id
+    );
+    assert_eq!(fills[0].qty, conf::lots(1));
+
+    // The reopened socket carries what comes next.
+    let next = order(dec!(100.0));
+    let next_cid = next.cid;
+    ud.place(next).await.unwrap();
+    conf::next_matching("a_fill_lost_in_the_gap", &mut rx, |e| {
+        matches!(&e.payload, Event::Order(o) if o.cid == next_cid && matches!(o.state, OrderState::Acked { .. }))
+    })
+    .await;
+    ud.shutdown(ShutdownMode::Immediate).await;
+}

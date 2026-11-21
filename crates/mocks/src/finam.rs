@@ -78,6 +78,8 @@ pub struct MockOptions {
     pub book_first_increment_streams: AtomicU32,
     /// Next `PlaceOrder` fails with this code before touching any state.
     pub place_error: Mutex<Option<Code>>,
+    /// Next `CancelOrder` fails with this code before touching any state.
+    pub cancel_error: Mutex<Option<Code>>,
     /// `PlaceOrder` applies the order but answers only after this delay (client timeout test).
     pub place_delay_ms: AtomicU64,
     /// The broker takes a stop order (`PlaceOrder` of type STOP or STOP_LIMIT, `PlaceSLTPOrder`), then the answer is
@@ -251,6 +253,16 @@ impl MockState {
             .get(account)
             .map(|a| a.orders.clone())
             .unwrap_or_default()
+    }
+
+    /// No `SubscribeOrders` or `SubscribeTrades` stream of the account is open any more (after `cut_user_streams`, once
+    /// the tasks of the streams have ended).
+    pub fn streams_closed(&self, account: &str) -> bool {
+        self.accounts
+            .lock()
+            .unwrap()
+            .get(account)
+            .is_none_or(|a| a.orders_tx.receiver_count() == 0 && a.trades_tx.receiver_count() == 0)
     }
 
     /// Pushes an order update to `SubscribeOrders` streams of the account (and stores it).
@@ -714,6 +726,9 @@ impl OrdersService for Mock {
         self.0.check_auth(&req)?;
         let r = req.into_inner();
         self.0.record(format!("CancelOrder:{}", r.account_id));
+        if let Some(code) = self.0.options.cancel_error.lock().unwrap().take() {
+            return Err(Status::new(code, "mock cancel error"));
+        }
         let out = self.0.account(&r.account_id, |a| {
             let o = a
                 .orders
@@ -843,6 +858,9 @@ impl OrdersService for Mock {
         self.0.check_auth(&req)?;
         let sltp = req.into_inner();
         self.0.record(format!("PlaceSLTPOrder:{}", sltp.account_id));
+        if let Some(code) = self.0.options.place_error.lock().unwrap().take() {
+            return Err(Status::new(code, "mock place error"));
+        }
         if sltp.symbol.is_empty() || (sltp.quantity_tp.is_none() && sltp.quantity_sl.is_none()) {
             return Err(Status::invalid_argument("symbol and a quantity required"));
         }

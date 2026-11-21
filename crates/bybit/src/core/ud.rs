@@ -271,7 +271,7 @@ fn read<T: serde::de::DeserializeOwned>(data: &serde_json::Value) -> Option<T> {
     match serde_json::from_value(data.clone()) {
         Ok(v) => Some(v),
         Err(e) => {
-            warn!("a data frame cannot be read: {e}");
+            warn!(error = %e, "data frame unreadable, dropped");
             None
         }
     }
@@ -285,7 +285,7 @@ impl BrokerCore for UdCore {
             WsIncoming::Connected => self.on_connected(out),
             WsIncoming::Data { topic, data, .. } => {
                 if !self.reg.has_topic(&topic) {
-                    debug!("a frame of an unknown topic {topic} is dropped");
+                    debug!(%topic, "frame of an unknown topic dropped");
                     return;
                 }
                 self.on_data(&topic, &data, now, out);

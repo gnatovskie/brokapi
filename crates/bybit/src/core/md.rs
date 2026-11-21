@@ -332,10 +332,7 @@ impl MdCore {
                     return None;
                 }
                 if !book.delta(&wire.bids, &wire.asks, wire.u) {
-                    warn!(
-                        "order book {topic}: delta {} after {} is not the next one",
-                        wire.u, book.last_u
-                    );
+                    warn!(%topic, update = wire.u, after = book.last_u, "order book delta out of order, resync");
                     book.synced = false;
                     if !self.gaps.iter().any(|t| t == topic) {
                         self.gaps.push(topic.to_string());
@@ -444,7 +441,7 @@ fn read<T: serde::de::DeserializeOwned>(data: &serde_json::Value) -> Option<T> {
     match serde_json::from_value(data.clone()) {
         Ok(v) => Some(v),
         Err(e) => {
-            warn!("a data frame cannot be read: {e}");
+            warn!(error = %e, "data frame unreadable, dropped");
             None
         }
     }
@@ -464,7 +461,7 @@ impl BrokerCore for MdCore {
                 data,
             } => {
                 if !self.reg.has_topic(&topic) {
-                    debug!("a frame of an unknown topic {topic} is dropped");
+                    debug!(%topic, "frame of an unknown topic dropped");
                     return;
                 }
                 self.on_data(&topic, kind, ts, cts, &data, now, out);

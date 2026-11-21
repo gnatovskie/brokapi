@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::{Client, Method, StatusCode};
 use serde::de::DeserializeOwned;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use super::models::Envelope;
 use crate::config::BybitConfig;
@@ -133,7 +133,7 @@ impl BybitHttpClient {
         let exchange_ms = t.time_nano / 1_000_000;
         let offset = exchange_ms - (before + after) / 2;
         self.inner.offset_ms.store(offset, Ordering::Relaxed);
-        debug!("the exchange clock is {offset} ms from the local one");
+        debug!(offset_ms = offset, "exchange clock read");
         Ok(offset)
     }
 
@@ -175,7 +175,7 @@ impl BybitHttpClient {
         query: &[(&str, String)],
     ) -> Result<T, BybitApiError> {
         let url = self.url(path, &encode(query));
-        let resp = self.client.get(url).send().await?;
+        let resp = send(&Method::GET, path, self.client.get(url)).await?;
         self.handle(resp).await
     }
 
@@ -206,7 +206,7 @@ impl BybitHttpClient {
     ) -> Result<T, BybitApiError> {
         let qs = encode(query);
         let req = self.client.get(self.url(path, &qs));
-        let resp = self.sign_request(req, &qs).send().await?;
+        let resp = send(&Method::GET, path, self.sign_request(req, &qs)).await?;
         self.handle(resp).await
     }
 
@@ -228,7 +228,13 @@ impl BybitHttpClient {
             .client
             .request(Method::POST, self.url(path, ""))
             .header("Content-Type", "application/json");
-        let resp = self.sign_request(req, &text).body(text).send().await?;
+        trace!(body = %brokapi_redact::scrub_body(&text), "request body");
+        let resp = send(
+            &Method::POST,
+            path,
+            self.sign_request(req, &text).body(text),
+        )
+        .await?;
         self.handle(resp).await
     }
 
@@ -265,9 +271,11 @@ impl BybitHttpClient {
         if method != Method::GET {
             req = req.body(text);
         }
-        let resp = req.send().await?;
+        let resp = send(&method, path, req).await?;
         let status = resp.status();
-        Ok((status, resp.text().await?))
+        let text = resp.text().await?;
+        trace!(body = %brokapi_redact::scrub_body(&text), "response body");
+        Ok((status, text))
     }
 
     fn url(&self, path: &str, query: &str) -> String {
@@ -296,6 +304,7 @@ impl BybitHttpClient {
     ) -> Result<T, BybitApiError> {
         let status = resp.status();
         let text = resp.text().await?;
+        trace!(body = %brokapi_redact::scrub_body(&text), "response body");
         if !status.is_success() {
             return Err(match status.as_u16() {
                 429 => BybitApiError::RateLimitExceeded,
@@ -325,6 +334,27 @@ impl BybitHttpClient {
             }),
         }
     }
+}
+
+/// Sends a request and writes it to the log on `debug`: the method and the path (never the query: it is signed, and a
+/// read of orders holds their ids), the HTTP status and the time.
+async fn send(
+    method: &Method,
+    path: &str,
+    req: reqwest::RequestBuilder,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let started = Instant::now();
+    let result = req.send().await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(resp) => {
+            debug!(method = %format_args!("{method} {path}"), status = resp.status().as_u16(), latency_ms, "request done")
+        }
+        Err(e) => {
+            debug!(method = %format_args!("{method} {path}"), latency_ms, error = %e, "request failed")
+        }
+    }
+    result
 }
 
 /// The query as the text that is sent and signed.

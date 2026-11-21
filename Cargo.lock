@@ -397,6 +397,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -405,6 +406,7 @@ name = "brokapi-bybit-protocol"
 version = "0.1.0-alpha.10"
 dependencies = [
  "brokapi-mocks",
+ "brokapi-redact",
  "dotenvy",
  "futures-util",
  "kanal",

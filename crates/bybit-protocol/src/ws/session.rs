@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tokio::time::{self, Instant, sleep};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::{Instrument, debug, error, info, trace, warn};
 
 use super::models::{WsIncoming, WsRequest, parse_incoming};
 use crate::error::BybitApiError;
@@ -98,16 +98,20 @@ impl WsSession {
         let subscriptions = Arc::new(Mutex::new(Vec::new()));
         let is_connected = Arc::new(AtomicBool::new(false));
         let dropped_events = Arc::new(AtomicU64::new(0));
-        let handle = tokio::spawn(run_loop(
-            http,
-            stream,
-            event_tx,
-            options,
-            Arc::clone(&subscriptions),
-            user_rx,
-            Arc::clone(&is_connected),
-            Arc::clone(&dropped_events),
-        ));
+        let handle = tokio::spawn(
+            run_loop(
+                http,
+                stream,
+                event_tx,
+                options,
+                Arc::clone(&subscriptions),
+                user_rx,
+                Arc::clone(&is_connected),
+                Arc::clone(&dropped_events),
+            )
+            // The session runs in the span of its connector: its lines show the broker and the role.
+            .in_current_span(),
+        );
         Self {
             user_tx,
             subscriptions,
@@ -221,14 +225,11 @@ async fn run_loop(
     'session: loop {
         let ws_stream = match connect_async(url.as_str()).await {
             Ok((s, res)) => {
-                info!(
-                    "WebSocket connected to {url} with status <{}>",
-                    res.status()
-                );
+                info!(%url, status = res.status().as_u16(), "stream connected");
                 s
             }
             Err(e) => {
-                error!("WS connect failed: {e}");
+                warn!(error = %e, retry_in_ms = backoff.as_millis() as u64, "stream connect failed, retrying");
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(backoff_max);
                 continue;
@@ -249,7 +250,7 @@ async fn run_loop(
                 .await
                 .is_err()
             {
-                error!("WS: failed to send the login");
+                warn!("stream login not sent, reconnecting");
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(backoff_max);
                 continue 'session;
@@ -257,7 +258,8 @@ async fn run_loop(
             match wait_login(&mut read).await {
                 Ok(()) => {}
                 Err(reason) => {
-                    error!("WS: login failed: {reason}");
+                    // The exchange refuses the key: retrying does not fix it.
+                    error!(reason = %reason, "stream login refused");
                     // The reader is told, so a subscription waiting for the stream fails with the reason.
                     let _ = event_tx
                         .send(WsIncoming::Ack {
@@ -286,13 +288,13 @@ async fn run_loop(
             for (seq, topic, req_id) in subs.iter() {
                 let text = WsRequest::subscribe(req_id, topic).to_json();
                 if write.send(Message::Text(text.into())).await.is_err() {
-                    error!("WS: failed to restore a subscription");
+                    warn!(%topic, "subscription not restored, reconnecting");
                     continue 'session;
                 }
                 restored.insert(*seq);
             }
             if !subs.is_empty() {
-                info!("Restored {} subscriptions", subs.len());
+                info!(count = subs.len(), "subscriptions restored");
             }
         }
         is_connected.store(true, Ordering::Release);
@@ -306,6 +308,7 @@ async fn run_loop(
                 frame = read.next() => match frame {
                     Some(Ok(Message::Text(text))) => {
                         last_rx = Instant::now();
+                        trace!(frame = %brokapi_redact::scrub_body(&text), "frame");
                         let incoming = parse_incoming(&text);
                         if incoming == WsIncoming::Pong {
                             continue 'inner;
@@ -314,7 +317,7 @@ async fn run_loop(
                             Ok(true) => {}
                             Ok(false) => {
                                 dropped_events.fetch_add(1, Ordering::Relaxed);
-                                warn!("WS: the receiving channel is full, a frame is dropped");
+                                warn!("receiving channel full, frame dropped");
                             }
                             Err(_) => break 'session,
                         }
@@ -326,25 +329,25 @@ async fn run_loop(
                         }
                     }
                     Some(Ok(Message::Close(_))) => {
-                        info!("WS closed by the server");
+                        debug!("stream closed by the exchange");
                         break 'inner;
                     }
                     Some(Ok(_)) => {}
                     Some(Err(e)) => {
-                        error!("WS read error: {e}");
+                        warn!(error = %e, "stream read failed");
                         break 'inner;
                     }
                     None => break 'inner,
                 },
                 _ = heartbeat.tick() => {
                     if last_rx.elapsed() > SILENCE_LIMIT {
-                        warn!("WS: nothing from the exchange for {SILENCE_LIMIT:?}, reconnecting");
+                        warn!(silence_ms = SILENCE_LIMIT.as_millis() as u64, "nothing from the exchange, reconnecting");
                         break 'inner;
                     }
                     if write.send(Message::Text(WsRequest::ping().to_json().into())).await.is_err() {
                         break 'inner;
                     }
-                    debug!("WS heartbeat sent");
+                    debug!("ping sent");
                 }
                 msg = user_rx.recv() => match msg {
                     Ok(Queued { seq, request }) => {
@@ -352,7 +355,7 @@ async fn run_loop(
                             continue 'inner;
                         }
                         if write.send(Message::Text(request.to_json().into())).await.is_err() {
-                            error!("WS write error");
+                            warn!("stream write failed");
                             break 'inner;
                         }
                     }
@@ -365,7 +368,10 @@ async fn run_loop(
         if connected_at.elapsed() >= HEALTHY_AFTER {
             backoff = backoff_min;
         }
-        warn!("WS disconnected, reconnecting in {backoff:?}...");
+        warn!(
+            retry_in_ms = backoff.as_millis() as u64,
+            "stream lost, reconnecting"
+        );
         sleep(backoff).await;
         backoff = (backoff * 2).min(backoff_max);
     }

@@ -18,6 +18,7 @@ use brokapi_sansio::SubscriptionKind;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::config::MarketDataConfig;
 use crate::core::MdCore;
@@ -43,6 +44,8 @@ const PAGE_SIZE: u32 = 1000;
 const MAX_PAGES: u32 = 50;
 
 struct MdShared {
+    /// `connector{broker, role}`: the tasks run in it, the commands take it as the parent.
+    span: tracing::Span,
     http: BybitHttpClient,
     ws: WsSession,
     limiter: Arc<BrokerLimiter>,
@@ -105,6 +108,16 @@ impl MarketDataConnector {
         limiter: Arc<BrokerLimiter>,
         out: mpsc::Sender<Envelope>,
     ) -> Result<Self, Error> {
+        let span =
+            brokapi_runtime::spans::connector("bybit", brokapi_runtime::spans::Role::Md, None);
+        Self::start_in(cfg, limiter, out).instrument(span).await
+    }
+
+    async fn start_in(
+        cfg: MarketDataConfig,
+        limiter: Arc<BrokerLimiter>,
+        out: mpsc::Sender<Envelope>,
+    ) -> Result<Self, Error> {
         let http = BybitHttpClient::new(cfg.bybit.clone()).map_err(map_config_err)?;
         http.sync_time().await.map_err(map_err)?;
 
@@ -115,6 +128,7 @@ impl MarketDataConnector {
         let emitter = Emitter::new(Arc::clone(&cfg.source), out);
 
         let inner = Arc::new(MdShared {
+            span: tracing::Span::current(),
             http,
             ws,
             limiter,
@@ -128,10 +142,14 @@ impl MarketDataConnector {
             category: cfg.bybit.category.as_str().to_string(),
         });
         let hook = Arc::clone(&inner);
-        let pump = tokio::spawn(run_pump(core, emitter, event_rx, cancel, move || {
-            let hook = Arc::clone(&hook);
-            async move { hook.ask_for_lost_books().await }
-        }));
+        let pump = tokio::spawn(
+            run_pump(core, emitter, event_rx, cancel, move || {
+                let hook = Arc::clone(&hook);
+                async move { hook.ask_for_lost_books().await }
+            })
+            .in_current_span(),
+        );
+        brokapi_runtime::spans::started();
         Ok(Self { inner, pump })
     }
 
@@ -149,6 +167,17 @@ impl MarketDataConnector {
     /// Stops the connector. Unless the mode is `Immediate` it cancels the streams first; `Graceful` also lets the bot's
     /// channel take what is still buffered.
     pub async fn shutdown(self, mode: ShutdownMode) -> ShutdownReport {
+        let span = self.inner.span.clone();
+        async move {
+            let report = self.shutdown_in(mode).await;
+            brokapi_runtime::spans::stopped(&report);
+            report
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn shutdown_in(self, mode: ShutdownMode) -> ShutdownReport {
         let mut unsubscribed = 0usize;
         let mut unsubscribe_failed = 0usize;
         if !matches!(mode, ShutdownMode::Immediate) {
@@ -193,55 +222,64 @@ impl MarketDataConnector {
         opts: SubscribeOpts,
         topic: String,
     ) -> Result<SubscriptionId, Error> {
-        let id = self.inner.sub_ids.next();
-        let req = self.inner.req_ids.next();
-        self.inner
-            .emitter
-            .register(id, Some(instrument.clone()), opts.backpressure);
-        // The core attributes incoming data to this subscription. It is told before the request goes out, so the
-        // answer cannot overtake it.
-        let (first_on_topic, notify) = {
-            let mut core = self.inner.core.lock().await;
-            let first = !core.has_topic(&topic);
-            core.register(id, core_kind, &topic, Some(&req));
-            (first, core.notifier())
-        };
-        let sent = if first_on_topic {
-            self.inner.ws.subscribe(&req, &topic).await
-        } else if kind == MdSubKind::OrderBook {
-            // The topic is already open for someone else: this book has no snapshot yet, so the exchange is asked
-            // for the topic again, which sends one to all the listeners.
-            self.inner.ws.resubscribe(&req, &topic).await
-        } else {
-            Ok(())
-        };
-        if let Err(e) = sent {
-            self.drop_sub(id).await;
-            return Err(map_err(e));
-        }
-        // Returns when the exchange has confirmed the stream: what happens after that is delivered.
-        let confirmed = wait_ack(
-            &self.inner.core,
-            notify,
-            self.inner.ack_timeout,
-            |c: &MdCore| c.sub_state(id),
-        )
-        .await;
-        if let Err(e) = confirmed {
-            self.drop_sub(id).await;
-            return Err(e);
-        }
-        self.inner.subs.write().await.insert(
-            id,
-            MdSubscription {
-                id,
-                instrument,
-                kind,
-                opts,
-                topic,
-            },
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            Some(&instrument.key),
         );
-        Ok(id)
+        brokapi_runtime::spans::command(span, async move {
+            let id = self.inner.sub_ids.next();
+            let req = self.inner.req_ids.next();
+            self.inner
+                .emitter
+                .register(id, Some(instrument.clone()), opts.backpressure);
+            // The core attributes incoming data to this subscription. It is told before the request goes out, so the
+            // answer cannot overtake it.
+            let (first_on_topic, notify) = {
+                let mut core = self.inner.core.lock().await;
+                let first = !core.has_topic(&topic);
+                core.register(id, core_kind, &topic, Some(&req));
+                (first, core.notifier())
+            };
+            let sent = if first_on_topic {
+                self.inner.ws.subscribe(&req, &topic).await
+            } else if kind == MdSubKind::OrderBook {
+                // The topic is already open for someone else: this book has no snapshot yet, so the exchange is asked
+                // for the topic again, which sends one to all the listeners.
+                self.inner.ws.resubscribe(&req, &topic).await
+            } else {
+                Ok(())
+            };
+            if let Err(e) = sent {
+                self.drop_sub(id).await;
+                return Err(map_err(e));
+            }
+            // Returns when the exchange has confirmed the stream: what happens after that is delivered.
+            let confirmed = wait_ack(
+                &self.inner.core,
+                notify,
+                self.inner.ack_timeout,
+                |c: &MdCore| c.sub_state(id),
+            )
+            .await;
+            if let Err(e) = confirmed {
+                self.drop_sub(id).await;
+                return Err(e);
+            }
+            self.inner.subs.write().await.insert(
+                id,
+                MdSubscription {
+                    id,
+                    instrument,
+                    kind,
+                    opts,
+                    topic,
+                },
+            );
+            Ok(id)
+        })
+        .await
     }
 
     /// Takes a subscription back: the core forgets it, the exchange is told when nobody else listens to the topic.
@@ -331,26 +369,35 @@ impl OrderBookSource for MarketDataConnector {
     }
 
     async fn unsubscribe(&self, sub: SubscriptionId) -> Result<(), Error> {
-        let record = self
-            .inner
-            .subs
-            .write()
-            .await
-            .remove(&sub)
-            .ok_or_else(|| Error::Rejected {
-                code: "unknown_subscription".into(),
-                message: format!("subscription {} is not active", sub.value()),
-            })?;
-        let orphans = self.inner.core.lock().await.forget(sub);
-        self.inner.emitter.unregister(sub);
-        let mut result = Ok(());
-        for topic in orphans {
-            if let Err(e) = self.inner.ws.unsubscribe(&topic).await {
-                result = Err(map_err(e));
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Unsubscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            let record =
+                self.inner
+                    .subs
+                    .write()
+                    .await
+                    .remove(&sub)
+                    .ok_or_else(|| Error::Rejected {
+                        code: "unknown_subscription".into(),
+                        message: format!("subscription {} is not active", sub.value()),
+                    })?;
+            let orphans = self.inner.core.lock().await.forget(sub);
+            self.inner.emitter.unregister(sub);
+            let mut result = Ok(());
+            for topic in orphans {
+                if let Err(e) = self.inner.ws.unsubscribe(&topic).await {
+                    result = Err(map_err(e));
+                }
             }
-        }
-        let _ = record;
-        result
+            let _ = record;
+            result
+        })
+        .await
     }
 }
 

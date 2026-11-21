@@ -45,7 +45,10 @@
 use std::fmt;
 use std::future::Future;
 
-use brokapi_core::{BrokerOrderId, ClientOrderId, Error, InstrumentKey, OrderAck, ReconcileReport};
+use brokapi_core::{
+    BrokerOrderId, ClientOrderId, Error, InstrumentKey, OrderAck, ReconcileReport, ShutdownReport,
+    SubscriptionId,
+};
 use tracing::field::{Empty, display};
 use tracing::{Instrument, Span, debug, info, warn};
 
@@ -155,6 +158,22 @@ pub fn op(
     )
 }
 
+/// The line of a connector that has started, on `info`. Called inside its [`connector`] span.
+pub fn started() {
+    info!("connector started");
+}
+
+/// The line of a connector that has stopped, on `info`, with what its shutdown did. Orders left without an answer are
+/// written by [`OrderRuntime`](crate::OrderRuntime) on `warn`, one line each.
+pub fn stopped(report: &ShutdownReport) {
+    info!(
+        unsubscribed = report.unsubscribed,
+        unsubscribe_failed = report.unsubscribe_failed,
+        inflight_abandoned = report.inflight_abandoned.len(),
+        "connector stopped"
+    );
+}
+
 /// Writes the broker's id of the order into the current [`op`] span.
 pub fn record_broker_order_id(id: &BrokerOrderId) {
     Span::current().record("broker_order_id", display(&id.0));
@@ -199,6 +218,12 @@ impl Outcome for OrderAck {
     fn done(&self, latency_ms: u64) {
         record_broker_order_id(&self.broker_id);
         info!(latency_ms, "command done");
+    }
+}
+
+impl Outcome for SubscriptionId {
+    fn done(&self, latency_ms: u64) {
+        info!(latency_ms, sub = self.0, "subscription opened");
     }
 }
 

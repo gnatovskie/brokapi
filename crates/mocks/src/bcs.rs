@@ -115,6 +115,10 @@ pub struct MockOptions {
     /// `GET /orders` answers an empty list of reports (`data: []`) for a known order: an answer that says
     /// nothing about the order.
     pub empty_reports: AtomicBool,
+    /// A quotes subscription (`dataType` 3) is taken without a word: no `QuotesSuccess` and no first quote, only
+    /// the quotes that come after a price change. The docs of BCS name no confirmation for quotes (the other
+    /// streams have one), and a quiet instrument sends nothing until its quote changes.
+    pub silent_quotes: AtomicBool,
     /// A cancel is answered with status 6 ("cancelling"): the order stays alive until
     /// [`MockServer::finish_cancel`] or a fill.
     pub cancel_pending: AtomicBool,
@@ -1542,6 +1546,11 @@ async fn handle_ws(
                     r["dataType"] != req["dataType"] || r["instruments"][0] != req["instruments"][0]
                 });
                 subs.push(req.clone());
+                if req["dataType"].as_i64() == Some(3)
+                    && state.options.silent_quotes.load(Ordering::Relaxed)
+                {
+                    continue;
+                }
                 let _ = write.send(Message::Text(success.to_string().into())).await;
                 let _ = write.send(Message::Text(data.to_string().into())).await;
                 if req["dataType"].as_i64() == Some(0) {

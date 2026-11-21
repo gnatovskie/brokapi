@@ -384,3 +384,57 @@ async fn find_by_kind_reads_every_page() {
         md.shutdown(ShutdownMode::Immediate).await;
     }
 }
+
+/// The docs of BCS name no confirmation for a quotes subscription (the order book, trades and candles have one),
+/// and live (16.11.2026) the subscription of an instrument that did not move was taken back as "not confirmed
+/// within 3 s". Without a word from the broker the subscription stays: a refusal would be an error frame, and
+/// the quotes come when the price moves.
+#[tokio::test]
+async fn quotes_stay_subscribed_when_the_broker_says_nothing_and_arrive_when_the_price_moves() {
+    let opts = Arc::new(MockOptions::default());
+    opts.silent_quotes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let server = MockServer::start(Arc::clone(&opts)).await;
+    let (md, mut rx) = md(&server).await;
+
+    let sub = brokapi_mocks::time::elapse_when(
+        "the subscribe reached the broker",
+        || !opts.ws_commands.lock().unwrap().is_empty(),
+        Duration::from_secs(10),
+        md.subscribe_quotes(&sber(), SubscribeOpts::conflate()),
+    )
+    .await
+    .expect("a quotes subscription the broker took without a word");
+
+    opts.prices.set("SBER", dec!(305.0));
+    let env = event(&mut rx, |e| matches!(e, Event::Quote(_))).await;
+    assert_eq!(env.sub, Some(sub));
+    // And it is a live subscription: it can be cancelled.
+    md.unsubscribe(sub).await.unwrap();
+    md.shutdown(ShutdownMode::Immediate).await;
+}
+
+/// Taking a silent quotes subscription as open must not swallow a refusal: the broker says no with an error frame,
+/// and that still fails the subscription and leaves nothing behind.
+#[tokio::test]
+async fn a_quotes_subscription_the_broker_refuses_is_still_an_error() {
+    let opts = Arc::new(MockOptions::default());
+    opts.silent_quotes
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *opts.fail_subscribe_ticker.lock().await = Some("BADSUB".into());
+    let server = MockServer::start(Arc::clone(&opts)).await;
+    let (md, _rx) = md(&server).await;
+    let bad = InstrumentId::new(
+        InstrumentKey::new("BADSUB", "TQBR"),
+        NativeId::TickerClass {
+            ticker: "BADSUB".into(),
+            class_code: "TQBR".into(),
+        },
+    );
+    let refused = md.subscribe_quotes(&bad, SubscribeOpts::conflate()).await;
+    assert!(
+        matches!(&refused, Err(Error::Rejected { code, .. }) if code == "subscription_refused"),
+        "a refused quotes subscription is Rejected, got {refused:?}"
+    );
+    md.shutdown(ShutdownMode::Immediate).await;
+}

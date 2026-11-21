@@ -440,6 +440,24 @@ impl MarketDataConnector {
                 },
             )
             .await;
+            // The docs of BCS name no confirmation for quotes (the other streams have one), and an instrument
+            // that does not move sends nothing. A refusal is an error frame, which fails the subscription at
+            // once, so a quotes subscription that is still pending at the end of the wait is taken as open
+            // (live 16.11.2026: it was taken back as "not confirmed" while the broker had accepted it).
+            let confirmed = match confirmed {
+                Err(_)
+                    if matches!(kind, MdSubKind::Quotes)
+                        && self.inner.core.lock().await.actual_state(id)
+                            == Some(crate::core::SubState::Pending) =>
+                {
+                    tracing::debug!(
+                        sub = id.value(),
+                        "quotes subscription has no confirmation in the docs, taken as open"
+                    );
+                    Ok(())
+                }
+                other => other,
+            };
             if let Err(e) = confirmed {
                 let _ = self.inner.ws.unsubscribe(ws).await;
                 self.set_core_sub(id, None).await;

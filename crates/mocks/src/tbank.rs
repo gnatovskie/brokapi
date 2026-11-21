@@ -98,6 +98,9 @@ pub struct MockOptions {
     /// `PostStopOrder` answers with this gRPC code and this status message (the broker's number, such as
     /// `80007`) instead of placing.
     pub stop_post_fail: Mutex<Option<(tonic::Code, String)>>,
+    /// The next `CancelOrder` or `CancelStopOrder` answers with this gRPC code and status message instead of cancelling
+    /// (once: the failure is taken by the call that meets it).
+    pub cancel_fail: Mutex<Option<(tonic::Code, String)>>,
     /// `GetStopOrders` answers `INVALID_ARGUMENT` 30261 when more than this many stop orders would be in
     /// the reply (0: no limit). A request with `from` and `to` counts only the stop orders created in it.
     pub stop_response_limit: AtomicU32,
@@ -1021,6 +1024,9 @@ impl OrdersService for Mock {
         &self,
         request: Request<pb::CancelOrderRequest>,
     ) -> Result<Response<pb::CancelOrderResponse>, Status> {
+        if let Some((code, text)) = self.0.opts.cancel_fail.lock().unwrap().take() {
+            return Err(Status::new(code, text));
+        }
         let r = request.into_inner();
         let by_request = r.order_id_type == Some(pb::OrderIdType::Request as i32);
         let o = self
@@ -1933,6 +1939,9 @@ impl StopOrdersService for Mock {
         &self,
         r: Request<pb::CancelStopOrderRequest>,
     ) -> Result<Response<pb::CancelStopOrderResponse>, Status> {
+        if let Some((code, text)) = self.0.opts.cancel_fail.lock().unwrap().take() {
+            return Err(Status::new(code, text));
+        }
         let r = r.into_inner();
         let mut stops = self.0.stops.lock().unwrap();
         match stops.get(&r.stop_order_id) {

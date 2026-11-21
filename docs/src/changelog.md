@@ -15,6 +15,12 @@
   чистки идут кадры WebSocket (БКС, АЛОР, Bybit) и тела HTTP Bybit. Уровень без модуля (`debug`) теперь относится к
   brokapi, библиотеки HTTP и gRPC остаются на `warn`. Подробно: [Логи](logging.md).
 
+- **Тип канала gRPC Т-Банка и Финама.** Строку каждого вызова на `debug` пишет новый слой `Logged` под интерсептором
+  токена. Поэтому `brokapi_tbank_protocol::Authed` теперь `InterceptedService<Logged, AuthInterceptor>`, а
+  `brokapi_finam_protocol::Authorized` теперь `InterceptedService<Logged, AuthInterceptor>`. Раньше вместо `Logged`
+  стоял `Channel`. **Что поменять:** ничего, если вы пишете `Authed` или `Authorized`, например
+  `OrdersServiceClient<Authed>`. Если тип выписан полностью, через `Channel`, замените его на псевдоним.
+
 - **Крейт `brokapi-redact`.** Маска номера счета (`mask_account`: `****3456`) и чистка запросов и ответов брокера
   (`scrub`, `scrub_body`) в одном месте для всех крейтов. `brokapi_mocks::live::scrub` теперь берет правила оттуда, старые
   пути работают. Вывод `{:?}` конфигов показывает номер счета маской (`TbankConfig`, `AlorConfig`, `UserDataConfig` Финама),

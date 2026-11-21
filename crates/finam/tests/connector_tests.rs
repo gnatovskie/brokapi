@@ -749,6 +749,52 @@ async fn executions_history_and_stream() {
     assert_eq!(history[0].cid, Some(cid));
 }
 
+/// Live (10.11.2026): `trade_id` of a fill was the number of its order. An order that is filled in two parts then has two
+/// trades with one `trade_id`, and the history must still give both: dropping the second as "seen" would report a smaller
+/// volume than the account holds.
+#[tokio::test]
+async fn two_fills_of_one_order_with_one_trade_id_are_two_executions_in_the_history() {
+    let server = MockServer::start().await;
+    let (ud, _rx) = reconciled(&server, "ACC1").await;
+    let mut req = limit_buy(dec!(1.0));
+    req.qty = Qty::from(10);
+    let cid = req.cid;
+    ud.place(req).await.unwrap();
+    let order = server.state.orders_of("ACC1").remove(0);
+    for (qty, seconds) in [("4", 100), ("6", 101)] {
+        server.state.push_trade(
+            "ACC1",
+            v1::AccountTrade {
+                trade_id: order.order_id.clone(),
+                symbol: "SBER@MISX".into(),
+                price: Some(brokapi_finam_protocol::pb::google::r#type::Decimal {
+                    value: "1".into(),
+                }),
+                size: Some(brokapi_finam_protocol::pb::google::r#type::Decimal {
+                    value: qty.into(),
+                }),
+                side: v1::Side::Buy as i32,
+                timestamp: Some(prost_types::Timestamp { seconds, nanos: 0 }),
+                order_id: order.order_id.clone(),
+                comment: order.order.clone().unwrap().comment,
+                account_id: "ACC1".into(),
+                ..Default::default()
+            },
+        );
+    }
+    let history = ud
+        .executions(TimeRange::new(
+            UnixNanos::ZERO,
+            UnixNanos::from_nanos(i64::MAX / 2),
+        ))
+        .await
+        .unwrap();
+    let total: Decimal = history.iter().map(|x| x.qty.decimal()).sum();
+    assert_eq!(history.len(), 2, "{history:?}");
+    assert_eq!(total, dec!(10), "the volume of the account");
+    assert!(history.iter().all(|x| x.cid == Some(cid)));
+}
+
 #[tokio::test]
 async fn portfolio_stream_pushes_updates_and_positions_balances_come_from_one_call() {
     let server = MockServer::start().await;

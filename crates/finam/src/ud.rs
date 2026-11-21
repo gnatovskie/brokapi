@@ -1333,6 +1333,26 @@ impl OrderExecutor for UserDataConnector {
 /// Pages of `Trades` read at most per `executions` call.
 const MAX_TRADE_PAGES: usize = 100;
 
+/// What tells one trade of `Trades` from another when pages overlap. Not `trade_id` alone: on a live account (10.11.2026)
+/// it was the number of the order, so the fills of an order filled in parts all had one. The time, the size and the
+/// price go with it, and two different fills do not share all four.
+fn trade_key(t: &brokapi_finam_protocol::pb::grpc::tradeapi::v1::AccountTrade) -> String {
+    let text = |d: &Option<brokapi_finam_protocol::pb::google::r#type::Decimal>| {
+        d.as_ref().map(|d| d.value.clone()).unwrap_or_default()
+    };
+    let (seconds, nanos) = t
+        .timestamp
+        .as_ref()
+        .map_or((0, 0), |t| (t.seconds, t.nanos));
+    format!(
+        "{}|{seconds}.{nanos}|{}|{}|{}",
+        t.trade_id,
+        text(&t.price),
+        text(&t.size),
+        t.side
+    )
+}
+
 fn too_long(limit: i32) -> Error {
     Error::Rejected {
         code: "range_too_long".into(),
@@ -1414,7 +1434,7 @@ impl ExecutionSource for UserDataConnector {
                     .collect();
                 let mut fresh = 0usize;
                 for t in resp.trades {
-                    if seen.insert(t.trade_id.clone()) {
+                    if seen.insert(trade_key(&t)) {
                         fresh += 1;
                         trades.push(t);
                     }

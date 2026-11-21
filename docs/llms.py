@@ -114,7 +114,7 @@ DESCRIPTIONS = {
     "gateway/commands.md": "Справочник команд brokapi (init, check, up, down, ps, top, status, start, stop, restart, add, remove, reload, logs, portfolio, orders, book, quote, direct, cancel-all, gateway run), коды выхода, --help каждой",
     "agent-contract.md": "Контракт для агентов: обязательные правила с причинами, последствиями и кодом, частые ошибки",
     "errors.md": "Ошибки и состояния: что значат, почему бывают, что делать (Unknown, Rejected, RateLimited, Degraded...)",
-    "logging.md": "Логи библиотеки: включить в Rust (logging::init) и Python (enable_logging), уровень и BROKAPI_LOG, директивы по модулю, свой подписчик (logging::filter)",
+    "logging.md": "Логи библиотеки: включить в Rust (logging::init) и Python (enable_logging) до старта коннекторов, уровень и BROKAPI_LOG, директивы по модулю, строки заявок, контекст connector и op, строка запроса, что не попадает в лог, свой подписчик (logging::filter)",
     "events.md": "Конверт Envelope, события Event, возможности коннекторов caps()",
     "coverage.md": "Какие методы API каждого брокера закрыты общим интерфейсом, а какие только через raw()",
     "api.md": "Справочник API Rust (rustdoc): список крейтов и ссылки на страницы справочника",

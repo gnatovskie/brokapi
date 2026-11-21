@@ -4,6 +4,9 @@
 //! subscriber themselves: without one there is no log and almost no cost. [`init`] installs a subscriber that
 //! writes to stderr. A program with a subscriber of its own takes [`filter`] and keeps its own output.
 //!
+//! Call it before the connectors start. A connector makes the span of its lines (broker, role, account) when it
+//! starts, and a span made with no subscriber stays off: the lines of that connector come without it.
+//!
 //! The level is chosen in this order:
 //!
 //! 1. the argument of [`init`] or [`filter`], when it is given;

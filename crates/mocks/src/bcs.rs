@@ -1335,6 +1335,13 @@ fn handle_orders(
 
     // Create.
     if rest.is_empty() || rest == "/sync" {
+        // The live API refuses a price written as text (`INVALID_FORMAT price`, 05.11.2026): a price is a JSON number.
+        if parsed["price"].is_string() {
+            return Some(validation(
+                "price",
+                "INVALID_FORMAT: a price is a JSON number, not text",
+            ));
+        }
         let price = dec_of(&parsed["price"]);
         let order_type = parsed["orderType"].as_str().unwrap_or("2").to_owned();
         if price == Some(brokapi_conformance::REJECT_PRICE.decimal()) {

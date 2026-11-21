@@ -52,7 +52,7 @@ reply = await client.raw(method, args=None, *, command=False)   # reply: dict (�
 {{#include ../../../crates/python/examples/raw.py:alor}}
 ```
 
-В аргументах `raw` `Decimal` уходит текстом, `UUID` текстом, `datetime` с поясом строкой RFC 3339, `float` отвергается (`TypeError`).
+В аргументах `raw` `Decimal` сохраняет все знаки и уходит числом JSON к БКС и АЛОРу (БКС не принимает цену строкой: `INVALID_FORMAT price`, с версии 0.1.0-alpha.11) и текстом к Т-Банку, Финаму и Bybit (деньги gRPC и цены Bybit передаются строкой). Нужна строка там, где по умолчанию число, передайте `str`. `UUID` уходит текстом, `datetime` с поясом строкой RFC 3339, `float` отвергается (`TypeError`).
 
 ## Что происходит при вызове
 

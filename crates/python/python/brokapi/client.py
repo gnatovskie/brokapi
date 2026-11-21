@@ -173,14 +173,19 @@ def _settings_json(settings: dict[str, Any]) -> str:
     return json.dumps({**rest, "request_timeout": float(timeout)}, separators=(",", ":"))
 
 
-def _raw_json(value: Any) -> Any:
-    """Arguments of ``raw`` as plain JSON: text for ``Decimal``, ``UUID`` and enums, RFC 3339 for a ``datetime``."""
+def _raw_json(value: Any, numbers: bool = False) -> Any:
+    """Arguments of ``raw`` as plain JSON: text for ``UUID`` and enums, RFC 3339 for a ``datetime``.
+
+    A ``Decimal`` is text, as the gRPC brokers and Bybit want it. With ``numbers`` it is a JSON number with all its
+    digits, as BCS and ALOR want it (BCS refuses a price written as text).
+    """
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
         raise TypeError("a float cannot be exact, pass a Decimal or a str")
     if isinstance(value, Decimal):
-        return _codec.decimal_text(value)
+        text = _codec.decimal_text(value)
+        return _codec.JsonNumber(text) if numbers else text
     if isinstance(value, uuid.UUID):
         return str(value)
     if isinstance(value, datetime):
@@ -190,10 +195,14 @@ def _raw_json(value: Any) -> Any:
     if isinstance(value, enum.Enum):
         return value.value
     if isinstance(value, Mapping):
-        return {str(k): _raw_json(v) for k, v in value.items()}
+        return {str(k): _raw_json(v, numbers) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_raw_json(v) for v in value]
+        return [_raw_json(v, numbers) for v in value]
     raise TypeError(f"cannot send {type(value).__name__} to the broker")
+
+
+# The brokers whose REST API takes a number as a JSON number: a `Decimal` in `raw` goes as one. The others take text.
+_NUMBER_BROKERS = ("bcs", "alor")
 
 
 def _opts(depth: Optional[int], backpressure: Optional[Backpressure]) -> dict[str, Any]:
@@ -631,12 +640,16 @@ class Client:
           ``X-REQID`` of an order command: the broker answers a repeated id with a copy of its first answer; a new one is
           made if you give none). Every call spends the default quota.
 
+        A ``Decimal`` in ``args`` keeps all its digits, a ``float`` is refused. It goes as a JSON number to BCS and ALOR (BCS refuses
+        a price written as text) and as text to T-Bank, Finam and Bybit (money of the gRPC brokers and the prices of Bybit are text).
+        To send text where a number would go, pass a ``str``.
+
         Raises :class:`~brokapi.Config` for a method the broker does not have or arguments that do not fit it
         (nothing was sent and no quota was spent).
         """
         if not isinstance(method, str) or not method:
             raise TypeError("the method is the name of a method of the broker")
-        params = {} if args is None else _raw_json(dict(args))
+        params = {} if args is None else _raw_json(dict(args), self.broker in _NUMBER_BROKERS)
         return await self._call("raw", method=method, args=params, command=bool(command))
 
     async def order_state(self, cid: uuid.UUID) -> OrderSnapshot:

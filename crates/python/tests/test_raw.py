@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
@@ -284,3 +285,77 @@ async def test_alor_takes_the_verb_and_the_path_and_a_request_id_for_a_command(
 async def test_a_read_through_command_mode_works_too_on_alor(alor: tuple[testing.MockBroker, brokapi.Client]) -> None:
     _, client = alor
     assert await client.raw("GET /md/v2/time", command=True) > 0
+
+
+@pytest.fixture(params=["bcs", "gw_bcs"])
+def bcs_road(request: pytest.FixtureRequest) -> tuple[testing.MockBroker, brokapi.Client]:
+    return request.getfixturevalue(request.param)
+
+
+@pytest.fixture(params=["alor", "gw_alor"])
+def alor_road(request: pytest.FixtureRequest) -> tuple[testing.MockBroker, brokapi.Client]:
+    return request.getfixturevalue(request.param)
+
+
+async def test_bcs_takes_a_price_as_a_json_number_not_as_text(
+    bcs_road: tuple[testing.MockBroker, brokapi.Client],
+) -> None:
+    """BCS refuses a price written as text (`INVALID_FORMAT price`, seen live): a `Decimal` in `raw` goes as a number."""
+    _, client = bcs_road
+    cid = brokapi.new_cid()
+    await client.raw(
+        "POST /trade-api-bff-operations/api/v1/orders",
+        {
+            "body": {
+                "clientOrderId": cid,
+                "side": "1",
+                "orderType": "2",
+                "orderQuantity": 1,
+                "ticker": "SBER",
+                "classCode": "TQBR",
+                "price": Decimal("249.05"),
+            }
+        },
+        command=True,
+    )
+    await client.reconcile([])
+    (order,) = await client.active_orders()
+    assert order.price == Decimal("249.05")
+
+
+async def test_alor_takes_a_price_as_a_json_number_not_as_text(
+    alor_road: tuple[testing.MockBroker, brokapi.Client],
+) -> None:
+    """The ALOR API describes a price as a number; a `Decimal` in `raw` keeps all its digits and goes as one."""
+    _, client = alor_road
+    await client.raw(
+        "POST /commandapi/warptrans/TRADE/v2/client/orders/actions/limit",
+        {
+            "body": {
+                "side": "buy",
+                "quantity": 1,
+                "price": Decimal("244.30"),
+                "instrument": {"symbol": "SBER", "exchange": "MOEX", "instrumentGroup": "TQBR"},
+                "user": {"portfolio": "D00001"},
+                "comment": "raw-number",
+                "timeInForce": "oneday",
+            }
+        },
+        command=True,
+    )
+    (order,) = await client.active_orders()
+    assert order.price == Decimal("244.30")
+
+
+def test_a_decimal_goes_as_a_number_where_the_broker_wants_one_and_keeps_every_digit() -> None:
+    from brokapi import _codec
+    from brokapi.client import _raw_json
+
+    args = {"body": {"price": Decimal("0.0000001"), "levels": [Decimal("12345678901234567.890123456789"), 7], "name": "123"}}
+    assert json.loads(_codec.dumps(_raw_json(args, numbers=True)), parse_float=Decimal) == {
+        "body": {"price": Decimal("0.0000001"), "levels": [Decimal("12345678901234567.890123456789"), 7], "name": "123"}
+    }
+    text = _codec.dumps(_raw_json(args, numbers=True))
+    assert '"price":0.0000001' in text and "12345678901234567.890123456789" in text and '"name":"123"' in text
+    # Where the broker wants text (gRPC money, Bybit), it stays text.
+    assert '"price":"0.0000001"' in _codec.dumps(_raw_json(args, numbers=False))

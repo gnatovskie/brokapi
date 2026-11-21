@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import json
+import re
 import types
 import typing
 import uuid
@@ -66,8 +67,21 @@ def cid_text(cid: uuid.UUID | str) -> str:
     raise TypeError(f"a cid is a uuid.UUID, got {type(cid).__name__}")
 
 
+class JsonNumber(str):
+    """The text of a number that goes into the JSON of a call as a number, not as text (``raw`` toward BCS and ALOR)."""
+
+
+# ``json.dumps`` cannot write a number it has as text without a float. A number is written as a string that starts
+# with this mark, and ``dumps`` then takes the quotes off. The mark is made anew for each process, so no text of a
+# user is taken for one.
+_NUMBER_MARK = "brokapi-number-" + uuid.uuid4().hex + ":"
+_NUMBER_IN_TEXT = re.compile('"' + re.escape(_NUMBER_MARK) + r'(-?\d+(?:\.\d+)?)"')
+
+
 def encode(value: Any) -> Any:
     """Python value -> something ``json.dumps`` writes: the serde form of the Rust type."""
+    if isinstance(value, JsonNumber):
+        return _NUMBER_MARK + str(value)
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
@@ -94,7 +108,8 @@ def encode(value: Any) -> Any:
 
 def dumps(args: dict[str, Any]) -> str:
     """The arguments of a native call as JSON text."""
-    return json.dumps({k: encode(v) for k, v in args.items()}, separators=(",", ":"))
+    text = json.dumps({k: encode(v) for k, v in args.items()}, separators=(",", ":"))
+    return _NUMBER_IN_TEXT.sub(r"\1", text)
 
 
 def loads(text: str) -> Any:

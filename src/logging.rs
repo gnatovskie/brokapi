@@ -14,6 +14,9 @@
 //! error. A wrong variable is ignored with a warning in the log: a typo in the environment must not stop a
 //! trading bot.
 //!
+//! A bare level above `warn` is the level of brokapi: `debug` switches on the lines of the brokapi crates, the HTTP and
+//! gRPC libraries under them stay at `warn`. A directive for a module (`hyper=debug`) switches them on.
+//!
 //! Every line shows its source, the path of the module that wrote it (`brokapi_bcs::ud`), so a line at `debug`
 //! can be switched on for one broker only.
 //!
@@ -171,10 +174,30 @@ fn check(directives: &str) -> Result<(), Error> {
 }
 
 fn build(directives: &str) -> Result<EnvFilter, Error> {
+    let scoped = scope(directives);
     EnvFilter::builder()
-        .parse(directives)
+        .parse(&scoped)
         .map_err(|_| Error::BadDirective(directives.to_owned()))
 }
+
+/// A bare level above `warn` is the level of brokapi: `debug` as `warn,brokapi=debug`. The other crates of the
+/// process stay at `warn`, else `debug` would bring the lines of the HTTP and gRPC libraries (every connection of
+/// the pool) between the lines of the connectors. A directive for a module (`hyper=debug`) is kept as written.
+fn scope(directives: &str) -> String {
+    directives
+        .split(',')
+        .flat_map(|part| match part.parse::<LevelFilter>() {
+            Ok(level) if level > LevelFilter::WARN && !part.contains('=') => {
+                vec!["warn".to_owned(), format!("{BROKAPI}={part}")]
+            }
+            _ => vec![part.to_owned()],
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The prefix of the targets of every brokapi crate (`brokapi_bcs`, `brokapi_runtime`, ...).
+const BROKAPI: &str = "brokapi";
 
 #[cfg(test)]
 mod tests {
@@ -249,5 +272,50 @@ mod tests {
             choose(Some(" warn , brokapi_bcs=debug "), None).map(|c| c.0),
             Ok("warn,brokapi_bcs=debug".to_owned())
         );
+    }
+
+    #[test]
+    fn a_bare_level_above_warn_is_the_level_of_brokapi() {
+        assert_eq!(scope("debug"), "warn,brokapi=debug");
+        assert_eq!(
+            scope("info,brokapi_bcs=trace"),
+            "warn,brokapi=info,brokapi_bcs=trace"
+        );
+        assert_eq!(scope("warn"), "warn");
+        assert_eq!(scope("off"), "off");
+        assert_eq!(scope("debug,hyper=debug"), "warn,brokapi=debug,hyper=debug");
+    }
+
+    #[test]
+    fn debug_shows_the_lines_of_brokapi_and_not_of_the_http_library() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let out = buf.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || out.clone())
+            .with_env_filter(build("debug").unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(target: "brokapi_bcs_protocol::http::client", "request done");
+            tracing::debug!(target: "hyper_util::client::legacy::pool", "pooling idle connection");
+            tracing::warn!(target: "hyper_util::client::legacy::pool", "connection lost");
+        });
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("request done"), "{text}");
+        assert!(!text.contains("pooling idle connection"), "{text}");
+        assert!(text.contains("connection lost"), "{text}");
     }
 }

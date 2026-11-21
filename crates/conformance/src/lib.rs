@@ -41,6 +41,7 @@
 //! Here the adapter is the BCS connector.
 //!
 //! ```
+//! # use std::sync::Arc;
 //! # use brokapi_core::Price;
 //! use brokapi_bcs::limits::default_limits;
 //! use brokapi_bcs::{UserDataConfig, UserDataConnector};

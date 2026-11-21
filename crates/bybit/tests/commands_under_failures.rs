@@ -11,9 +11,9 @@ use brokapi_bybit::util::instrument_id;
 use brokapi_bybit::{UserDataConfig, UserDataConnector};
 use brokapi_bybit_protocol::config::BybitConfig;
 use brokapi_core::{
-    ClientOrderId, Decimal, Envelope, Error, InstrumentId, OrderExecutor, OrderState, OrderType,
-    PlaceOrderRequest, PlaceStopOrderRequest, Price, Qty, Side, StopExpiry, StopOrderExecutor,
-    StopOrderKind, StopOrderRef, dec,
+    ClientOrderId, Decimal, Envelope, Error, Event, ExecutionSource, InstrumentId, OrderExecutor,
+    OrderState, OrderType, PlaceOrderRequest, PlaceStopOrderRequest, Price, Qty, Side, StopExpiry,
+    StopOrderExecutor, StopOrderKind, StopOrderRef, TimeRange, UnixNanos, dec,
 };
 use brokapi_runtime::BrokerLimiter;
 use mock_server::{DEFAULT_KEY, MockOptions, MockServer, SECRET};
@@ -30,6 +30,15 @@ async fn start() -> (
 ) {
     let opts = Arc::new(MockOptions::default());
     let server = MockServer::start(Arc::clone(&opts)).await;
+    let (ud, rx) = start_on(&opts, &server).await;
+    std::mem::forget(server);
+    (opts, ud, rx)
+}
+
+async fn start_on(
+    _opts: &Arc<MockOptions>,
+    server: &MockServer,
+) -> (UserDataConnector, mpsc::Receiver<Envelope>) {
     let mut limits = default_limits();
     for bucket in limits.buckets.values_mut() {
         bucket.burst = bucket.burst.max(1000);
@@ -44,8 +53,7 @@ async fn start() -> (
     .await
     .expect("ud start");
     ud.reconcile(&[]).await.expect("reconcile");
-    std::mem::forget(server);
-    (opts, ud, rx)
+    (ud, rx)
 }
 
 fn limit_buy() -> PlaceOrderRequest {
@@ -185,4 +193,67 @@ async fn a_stop_order_that_hits_a_limit_or_fails_is_not_repeated() {
         Err(Error::Unknown)
     ));
     assert_eq!(ud.active_stop_orders().await.unwrap().len(), 1);
+}
+
+/// A fill that happens while the private socket is down never arrives as an event. After `Reconnected` the bot finds it with
+/// `reconcile`, `order_state` and `executions`, and the reopened socket carries the next order.
+#[tokio::test]
+async fn a_fill_lost_in_the_gap_of_the_socket_is_found_after_the_reconnect() {
+    let opts = Arc::new(MockOptions::default());
+    let server = MockServer::start(Arc::clone(&opts)).await;
+    let (ud, mut rx) = start_on(&opts, &server).await;
+    ud.subscribe_order_state().await.unwrap();
+    ud.subscribe_executions().await.unwrap();
+    let req = limit_buy();
+    let cid = req.cid;
+    ud.place(req).await.unwrap();
+
+    let before = opts.ws_connections();
+    server.cut_event_sockets();
+    brokapi_mocks::time::wait_until("the socket is down", || opts.event_sockets() == 0).await;
+    server.fill(
+        &cid.hyphenated().to_string(),
+        Qty::from(10),
+        Price::new(dec!(50)),
+    );
+    brokapi_mocks::time::jump_until(
+        "the socket is back",
+        std::time::Duration::from_secs(1),
+        || opts.ws_connections() > before,
+    )
+    .await;
+    brokapi_conformance::next_matching("a_fill_lost_in_the_gap", &mut rx, |e| {
+        matches!(e.payload, Event::Reconnected { .. })
+    })
+    .await;
+
+    let report = ud.reconcile(&[cid]).await.unwrap();
+    assert_eq!(report.closed_offline, vec![cid], "{report:?}");
+    assert!(matches!(
+        ud.order_state(cid).await.unwrap().state,
+        OrderState::Filled { .. }
+    ));
+    let fills = ud
+        .executions(TimeRange::new(
+            UnixNanos::ZERO,
+            UnixNanos::from_nanos(i64::MAX / 2),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        fills
+            .iter()
+            .any(|x| x.cid == Some(cid) && x.qty == Qty::from(10)),
+        "{fills:?}"
+    );
+
+    let next = limit_buy();
+    let next_cid = next.cid;
+    ud.place(next).await.unwrap();
+    brokapi_conformance::next_matching(
+        "a_fill_lost_in_the_gap",
+        &mut rx,
+        |e| matches!(&e.payload, Event::Order(o) if o.cid == next_cid),
+    )
+    .await;
 }

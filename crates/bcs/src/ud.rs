@@ -1232,8 +1232,11 @@ impl PortfolioSource for UserDataConnector {
 /// every choice the docs leave open (lifetime, trigger direction, the meaning of `price`, TP+SL pairs),
 /// is in [`crate::map::stop`]; each of them is a choice made from the docs. Both commands use the synchronous methods, for the reasons given at `place`.
 ///
-/// There is no stream of stop order statuses: `orders/events/ws` documents only order types 1 and 2,
-/// whether it carries conditional orders is a live question, so `subscribe_stop_orders` is `Unsupported`.
+/// There is no stream of stop order statuses, `subscribe_stop_orders` is `Unsupported`. The broker does
+/// send conditional orders through `orders/events/ws`, like plain orders but with price 0 and no sign
+/// that they are stops. The connector keeps the stops it placed out of `Event::Order` until they fill
+/// (then they are orders), see [`UdCore::register_stop`](crate::UdCore::register_stop). Read stops
+/// with `active_stop_orders`.
 #[async_trait]
 impl StopOrderExecutor for UserDataConnector {
     async fn place_stop(&self, req: PlaceStopOrderRequest) -> Result<OrderAck, Error> {
@@ -1273,6 +1276,8 @@ impl StopOrderExecutor for UserDataConnector {
                 }
                 orders.register_place(req.cid, now);
             }
+            // Before the request: the broker's event about the stop can come before its answer.
+            self.inner.core.lock().await.register_stop(req.cid);
 
             let resp = match self.inner.http.create_order_sync(&wire).await {
                 Ok(resp) => resp,

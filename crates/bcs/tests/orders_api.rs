@@ -571,6 +571,51 @@ async fn stop_orders_roundtrip_with_the_wire_the_docs_describe() {
 }
 
 #[tokio::test]
+async fn a_stop_order_is_not_an_order_in_the_order_stream_until_it_fills() {
+    // The broker sends conditional orders through `orders/events/ws` like plain ones (live 05.11.2026:
+    // `Acked`, then `Cancelled`, price 0, under the cid of the stop). They are not orders yet.
+    let opts = Arc::new(MockOptions::default());
+    let server = MockServer::start(Arc::clone(&opts)).await;
+    let (ud, mut rx) = ud(&server).await;
+    ud.subscribe_order_state().await.unwrap();
+    ud.subscribe_executions().await.unwrap();
+
+    let stop = stop_req(StopOrderKind::StopLoss, dec!(250.0), None);
+    let stop_cid = stop.cid;
+    ud.place_stop(stop).await.unwrap();
+    ud.cancel_stop(StopOrderRef::Cid(stop_cid)).await.unwrap();
+    // The fence: the events of the stop went out first, so had one leaked it would come before this.
+    let req = limit_buy(dec!(100.0));
+    let cid = req.cid;
+    ud.place(req).await.unwrap();
+    let first = next_event(&mut rx, |e| matches!(e, Event::Order(_))).await;
+    assert!(
+        matches!(&first.payload, Event::Order(o) if o.cid == cid),
+        "a waiting stop came as an order: {:?}",
+        first.payload
+    );
+
+    // A stop that triggered and filled is an order from its first fill on, with its fill.
+    let fired = stop_req(StopOrderKind::TakeProfit, dec!(400.0), None);
+    let fired_cid = fired.cid;
+    ud.place_stop(fired).await.unwrap();
+    server.fill(
+        &fired_cid.hyphenated().to_string(),
+        Qty::from(2),
+        Price::from(400),
+    );
+    let env = next_event(&mut rx, |e| matches!(e, Event::Order(_))).await;
+    assert!(
+        matches!(&env.payload, Event::Order(o) if o.cid == fired_cid && matches!(o.state, OrderState::Filled { .. })),
+        "{:?}",
+        env.payload
+    );
+    let env = next_event(&mut rx, |e| matches!(e, Event::Execution(_))).await;
+    assert!(matches!(&env.payload, Event::Execution(x) if x.cid == Some(fired_cid)));
+    ud.shutdown(ShutdownMode::Immediate).await;
+}
+
+#[tokio::test]
 async fn stop_order_input_is_refused_before_anything_is_sent() {
     let opts = Arc::new(MockOptions::default());
     let server = MockServer::start(Arc::clone(&opts)).await;

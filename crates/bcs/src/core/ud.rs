@@ -123,6 +123,9 @@ pub struct UdCore {
     /// How many times the order events session announced a connect. From the second on, the connection
     /// was lost once and what happened to the orders in the gap is not known.
     connects: u32,
+    /// Cids of the stop (conditional) orders this process placed that have not filled yet, see
+    /// [`register_stop`](Self::register_stop).
+    stops: HashSet<brokapi_core::ClientOrderId>,
 }
 
 /// How many `executionId`s are remembered for de-duplication.
@@ -154,7 +157,20 @@ impl UdCore {
             totals_order: VecDeque::new(),
             done: brokapi_runtime::FinishedWindow::new(),
             connects: 0,
+            stops: HashSet::new(),
         }
+    }
+
+    /// Marks `cid` as a stop order. Call it before the order is sent: its event can come before the
+    /// answer.
+    ///
+    /// BCS sends conditional orders through `orders/events/ws` like plain orders (seen live: `Acked`,
+    /// then `Cancelled`, price 0, under the cid of the stop). A waiting stop is not an order, so its
+    /// messages make no `Event::Order`, as with the other brokers, whose order streams carry no stops.
+    /// From its first fill on (it triggered) it is an order and its messages pass. A stop placed
+    /// outside this process cannot be told from an order and still comes as one.
+    pub fn register_stop(&mut self, cid: brokapi_core::ClientOrderId) {
+        self.stops.insert(cid);
     }
 
     /// Remembers that the broker's order `order_id` is our `cid`.
@@ -257,6 +273,16 @@ impl UdCore {
             if let brokapi_core::Event::Order(snapshot) = &event {
                 if let Some(id) = &snapshot.broker_id {
                     self.learn_order_id(id.as_str(), snapshot.cid);
+                }
+                if self.stops.contains(&snapshot.cid) {
+                    // A stop leaves the set once it fills (an order from then on) or ends unfilled.
+                    let waiting = snapshot.filled.decimal().is_zero();
+                    if !waiting || snapshot.state.is_final() {
+                        self.stops.remove(&snapshot.cid);
+                    }
+                    if waiting {
+                        return;
+                    }
                 }
                 self.apply_order_snapshot(snapshot, now);
             }

@@ -481,3 +481,18 @@ async fn a_history_that_fills_a_page_is_an_error_not_a_silent_cut() {
     }
     ud.shutdown(ShutdownMode::Immediate).await;
 }
+
+/// The log keeps to the rules: requests on debug, the cid on every line of a command, the account as a mask,
+/// no secret even on trace.
+#[tokio::test]
+async fn logs() {
+    let server = MockServer::start(Arc::new(MockOptions::default())).await;
+    conf::log_rules(
+        || ud(&server),
+        &sber(),
+        Price::new(dec!(1.0)),
+        &["mock-refresh-token"],
+        Some(brokapi_mocks::alor::PORTFOLIO),
+    )
+    .await;
+}

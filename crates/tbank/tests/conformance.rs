@@ -405,3 +405,18 @@ async fn the_order_book_is_resynced_after_a_cut() {
     .await;
     md.shutdown(ShutdownMode::Immediate).await;
 }
+
+/// The log keeps to the rules: requests on debug, the cid on every line of a command, the account as a mask,
+/// no secret even on trace.
+#[tokio::test]
+async fn logs() {
+    let server = MockServer::start(Arc::new(MockOptions::default())).await;
+    conf::log_rules(
+        || ud(&server),
+        &sber(),
+        Price::from(1),
+        &[TOKEN],
+        Some(ACCOUNT_A),
+    )
+    .await;
+}

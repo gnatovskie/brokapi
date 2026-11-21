@@ -450,8 +450,11 @@ dependencies = [
  "brokapi-bcs-protocol",
  "brokapi-core",
  "brokapi-mocks",
+ "brokapi-redact",
  "brokapi-runtime",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

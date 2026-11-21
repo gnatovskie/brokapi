@@ -15,8 +15,12 @@ categories.workspace = true
 
 [dependencies]
 brokapi-core.workspace = true
+brokapi-redact.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 uuid.workspace = true
+# `log_rules`: the lines of a connector caught in memory and checked.
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "std", "registry"] }
 
 [dev-dependencies]
 # The examples of the scenarios run against the BCS connector on its mock (a dev-dependency cycle is fine for doctests).

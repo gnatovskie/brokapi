@@ -587,3 +587,18 @@ async fn trades_without_a_time_cannot_be_paged() {
     }
     ud.shutdown(ShutdownMode::Immediate).await;
 }
+
+/// The log keeps to the rules: requests on debug, the cid on every line of a command, the account as a mask,
+/// no secret even on trace.
+#[tokio::test]
+async fn logs() {
+    let server = MockServer::start().await;
+    conf::log_rules(
+        || ud(&server, "ACC1"),
+        &sber(),
+        Price::from(1),
+        &[brokapi_mocks::finam::SECRET],
+        Some("ACC1"),
+    )
+    .await;
+}

@@ -49,7 +49,7 @@
 //!
 //! # #[tokio::main(flavor = "current_thread")]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let server = brokapi_mocks::bcs::MockServer::start(Default::default()).await;
+//! # let server = brokapi_mocks::bcs::MockServer::start(Arc::default()).await;
 //! # let cfg = brokapi_bcs_protocol::config::BcsConfig::for_mock("mock-refresh-token", &server.http_base).with_write(true);
 //! # let (tx, _rx) = tokio::sync::mpsc::channel(256);
 //! # let ud = UserDataConnector::start(UserDataConfig::new(cfg, "bcs-ud"), BrokerLimiter::new(&default_limits()), tx).await?;
@@ -68,12 +68,12 @@ use std::future::Future;
 use std::time::Duration;
 
 use brokapi_core::{
-    ClientOrderId, Decimal, Envelope, Error, Event, ExecutionSource, InstrumentId, InstrumentQuery,
-    InstrumentSource, MarketDataSource, OrderBook, OrderBookSource, OrderExecutor, OrderState,
-    OrderType, PlaceOrderRequest, PlaceStopOrderRequest, PortfolioSource, Price, Qty,
-    ReplaceOrderRequest, Side, StopExpiry, StopOrderExecutor, StopOrderKind, StopOrderRef,
-    StopOrderState, SubscribeOpts, SubscriptionId, TimeRange, Timeframe, TradingAvailability,
-    UnixNanos,
+    ClientOrderId, Connector, Decimal, Envelope, Error, Event, ExecutionSource, InstrumentId,
+    InstrumentQuery, InstrumentSource, MarketDataSource, OrderBook, OrderBookSource, OrderExecutor,
+    OrderState, OrderType, PlaceOrderRequest, PlaceStopOrderRequest, PortfolioSource, Price, Qty,
+    ReplaceOrderRequest, ShutdownMode, Side, StopExpiry, StopOrderExecutor, StopOrderKind,
+    StopOrderRef, StopOrderState, SubscribeOpts, SubscriptionId, TimeRange, Timeframe,
+    TradingAvailability, UnixNanos,
 };
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -644,6 +644,162 @@ pub async fn place_and_cancel<U: OrderExecutor + ?Sized>(ud: &U, id: &Instrument
     ud.cancel(cid)
         .await
         .unwrap_or_else(|e| fail(S, format!("cancel failed: {e:?}")));
+}
+
+/// What the log of a connector must keep to (§16 of the connector specification). The connector is started by
+/// `start`, runs `reconcile`, a `place` and a `cancel` and is stopped, with every line of brokapi caught in memory at
+/// `trace` (the other crates of the process at `warn`, as `brokapi::logging` sets them). The lines are checked:
+///
+/// - no line of a request (`request done`) on `info` or above: a request is `debug`;
+/// - every line of the `place` and the `cancel` names their `cid` and is in the span of the connector;
+/// - the account is never written in full, and the span of the connector shows it as a mask (when `account` is
+///   given);
+/// - none of `secrets` (the tokens and keys of the run) is in the log, not even on `trace`;
+/// - the life of the connector and the commands have their lines on `info`: `connector started`, `reconciled`,
+///   `command done`, `connector stopped`.
+///
+/// The connector is started inside: a span made before a subscriber exists stays off, as in a program that turns its
+/// log on after the connectors. The catching subscriber is that of the current thread only, so the test runs on the
+/// current-thread runtime of tokio (`#[tokio::test]`), where the tasks of the connector run too. `start` returns the
+/// connector and whatever must live as long as it (the receiver of its events).
+///
+/// # Examples
+///
+/// ```
+/// # use std::sync::Arc;
+/// # use brokapi_bcs::{UserDataConfig, UserDataConnector};
+/// # use brokapi_bcs_protocol::config::BcsConfig;
+/// # use brokapi_runtime::BrokerLimiter;
+/// # use brokapi_core::{Decimal, InstrumentId, InstrumentKey, NativeId, Price, dec};
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// # let server = brokapi_mocks::bcs::MockServer::start(Arc::default()).await;
+/// # let sber = InstrumentId::new(InstrumentKey::new("SBER", "TQBR"), NativeId::TickerClass { ticker: "SBER".into(), class_code: "TQBR".into() });
+/// let start = || async {
+///     let (tx, rx) = tokio::sync::mpsc::channel(256);
+///     let cfg = BcsConfig::for_mock("mock-refresh-token", &server.http_base).with_write(true);
+///     let limiter = BrokerLimiter::new(&brokapi_bcs::limits::default_limits());
+///     let ud = UserDataConnector::start(UserDataConfig::new(cfg, "bcs-ud"), limiter, tx).await.unwrap();
+///     (ud, rx)
+/// };
+/// brokapi_conformance::log_rules(start, &sber, Price::new(dec!(1.0)), &["mock-refresh-token"], None).await;
+/// # }
+/// ```
+pub async fn log_rules<U, R, F, Fut>(
+    start: F,
+    id: &InstrumentId,
+    price: Price,
+    secrets: &[&str],
+    account: Option<&str>,
+) where
+    U: OrderExecutor + Connector,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = (U, R)>,
+{
+    const S: &str = "log_rules";
+    let cid = ClientOrderId::new_v4();
+    let text = caught(async {
+        let (ud, keep) = start().await;
+        ud.reconcile(&[])
+            .await
+            .unwrap_or_else(|e| fail(S, format!("reconcile failed: {e:?}")));
+        ud.place(PlaceOrderRequest {
+            cid,
+            instrument: id.clone(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            qty: lots(1),
+            price: Some(price),
+        })
+        .await
+        .unwrap_or_else(|e| fail(S, format!("place failed: {e:?}")));
+        ud.cancel(cid)
+            .await
+            .unwrap_or_else(|e| fail(S, format!("cancel failed: {e:?}")));
+        ud.shutdown(ShutdownMode::Immediate).await;
+        drop(keep);
+    })
+    .await;
+    let lines: Vec<&str> = text.lines().collect();
+    let level = |line: &str| line.split_whitespace().nth(1).unwrap_or("").to_owned();
+    for line in &lines {
+        if matches!(level(line).as_str(), "INFO" | "WARN" | "ERROR")
+            && line.contains("request done")
+        {
+            fail(S, format!("a request on {}: {line}", level(line)));
+        }
+        let command = line.contains("op=\"place\"") || line.contains("op=\"cancel\"");
+        if command && !line.contains(&format!("cid={cid}")) {
+            fail(S, format!("a line of a command without its cid: {line}"));
+        }
+        if command && !line.contains("connector{broker=") {
+            fail(
+                S,
+                format!("a line of a command out of the span of its connector: {line}"),
+            );
+        }
+        for secret in secrets {
+            if !secret.is_empty() && line.contains(secret) {
+                fail(S, format!("a secret in the log: {line}"));
+            }
+        }
+    }
+    if let Some(account) = account {
+        let mask = brokapi_redact::mask_account(account);
+        if let Some(line) = lines.iter().find(|l| l.contains(account)) {
+            fail(S, format!("the account in full: {line}"));
+        }
+        if !lines
+            .iter()
+            .any(|l| l.contains(&format!("account=\"{mask}\"")))
+        {
+            fail(S, format!("no line shows the account as {mask}:\n{text}"));
+        }
+    }
+    for done in [
+        "connector started",
+        "reconciled",
+        "command done",
+        "connector stopped",
+    ] {
+        if !lines.iter().any(|l| level(l) == "INFO" && l.contains(done)) {
+            fail(S, format!("no `{done}` line on INFO:\n{text}"));
+        }
+    }
+}
+
+/// Runs `work` with every line of brokapi caught: `trace` for the brokapi crates, `warn` for the others.
+async fn caught(work: impl Future<Output = ()>) -> String {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let buf = Buf::default();
+    let out = buf.clone();
+    let targets = tracing_subscriber::filter::Targets::new()
+        .with_default(tracing::Level::WARN)
+        .with_target("brokapi", tracing::Level::TRACE);
+    let subscriber = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(move || out.clone())
+                .with_ansi(false),
+        )
+        .with(targets);
+    let guard = tracing::subscriber::set_default(subscriber);
+    work.await;
+    drop(guard);
+    String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).into_owned()
 }
 
 /// `order_state` of a `cid` the broker has never seen is a refusal: [`Error::Rejected`] with code

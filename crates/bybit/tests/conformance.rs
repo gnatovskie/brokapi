@@ -500,3 +500,18 @@ async fn the_fills_of_a_long_range_are_read_in_windows_of_seven_days() {
     );
     ud.shutdown(ShutdownMode::Immediate).await;
 }
+
+/// The log keeps to the rules: requests on debug, the cid on every line of a command, the account as a mask,
+/// no secret even on trace.
+#[tokio::test]
+async fn logs() {
+    let server = MockServer::start(Arc::new(MockOptions::default())).await;
+    conf::log_rules(
+        || ud(&server),
+        &mock(),
+        Price::new(dec!(1.0)),
+        &[DEFAULT_KEY, SECRET],
+        None,
+    )
+    .await;
+}

@@ -63,6 +63,9 @@ pub struct MockOptions {
     /// Requests that change an order (the POST, PUT and DELETE of the order methods) the mock has received,
     /// counted when they arrive, before any delay.
     pub order_commands: AtomicU32,
+    /// The next order command is refused with this HTTP status and message (`{"message": ..., "code": "Error"}`), before it
+    /// touches any state: a limit (429), a refusal such as `ClientBlocked` (400), or a failure on the way (503).
+    pub command_refusal: std::sync::Mutex<Option<(u16, String)>>,
     /// The mock holds every order command this many milliseconds before it acts and answers. The clock is the
     /// tokio clock of the test, so `brokapi_mocks::time::jump` ends the wait.
     pub order_delay_ms: AtomicU64,
@@ -629,6 +632,12 @@ async fn http_handler(
     let is_command = path.starts_with("/commandapi/") || path.starts_with("/warptrans/");
     if is_command {
         state.options.order_commands.fetch_add(1, Ordering::SeqCst);
+        if let Some((status, message)) = state.options.command_refusal.lock().unwrap().take() {
+            return json_response(
+                StatusCode::from_u16(status).expect("a status code"),
+                &json!({"message": message, "code": "Error"}).to_string(),
+            );
+        }
         let delay = state.options.order_delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
             // The broker takes the order after the delay even if the client gave up waiting and closed the

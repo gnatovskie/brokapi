@@ -68,6 +68,9 @@ pub struct MockOptions {
     /// Requests that change an order (the POSTs of `/v5/order/...`) the mock has received, counted when they arrive,
     /// before any delay.
     pub order_commands: AtomicU32,
+    /// The next order command (`POST /v5/order/...`) is answered with this HTTP status and this body instead of being
+    /// carried out, once: a limit (`10006`), a refusal such as `110007`, or a failure on the way (`503`).
+    pub command_refusal: std::sync::Mutex<Option<(u16, String)>>,
     /// The mock holds every order command this many milliseconds before it acts and answers. The clock is the tokio
     /// clock of the test, so `brokapi_mocks::time::jump` ends the wait.
     pub order_delay_ms: AtomicU64,
@@ -738,6 +741,9 @@ async fn http_handler(
     let is_command = method == Method::POST && path.starts_with("/v5/order/");
     if is_command {
         state.options.order_commands.fetch_add(1, Ordering::SeqCst);
+        if let Some((status, body)) = state.options.command_refusal.lock().unwrap().take() {
+            return json_response(StatusCode::from_u16(status).expect("a status code"), &body);
+        }
         let delay = state.options.order_delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
             // The exchange takes the order after the delay even if the client gave up waiting and closed the

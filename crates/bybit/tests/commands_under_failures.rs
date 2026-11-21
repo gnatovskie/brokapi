@@ -1,0 +1,188 @@
+//! What a bot sees when the exchange refuses an order command (a limit, a refusal) or fails it on the way. Against the
+//! mock, no network, no money.
+
+mod mock_server;
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use brokapi_bybit::limits::default_limits;
+use brokapi_bybit::util::instrument_id;
+use brokapi_bybit::{UserDataConfig, UserDataConnector};
+use brokapi_bybit_protocol::config::BybitConfig;
+use brokapi_core::{
+    ClientOrderId, Decimal, Envelope, Error, InstrumentId, OrderExecutor, OrderState, OrderType,
+    PlaceOrderRequest, PlaceStopOrderRequest, Price, Qty, Side, StopExpiry, StopOrderExecutor,
+    StopOrderKind, StopOrderRef, dec,
+};
+use brokapi_runtime::BrokerLimiter;
+use mock_server::{DEFAULT_KEY, MockOptions, MockServer, SECRET};
+use tokio::sync::mpsc;
+
+fn mock() -> InstrumentId {
+    instrument_id("MOCKUSDT", "linear")
+}
+
+async fn start() -> (
+    Arc<MockOptions>,
+    UserDataConnector,
+    mpsc::Receiver<Envelope>,
+) {
+    let opts = Arc::new(MockOptions::default());
+    let server = MockServer::start(Arc::clone(&opts)).await;
+    let mut limits = default_limits();
+    for bucket in limits.buckets.values_mut() {
+        bucket.burst = bucket.burst.max(1000);
+    }
+    let (tx, rx) = mpsc::channel(256);
+    let cfg = BybitConfig::for_mock(DEFAULT_KEY, SECRET, &server.http_base);
+    let ud = UserDataConnector::start(
+        UserDataConfig::new(cfg, "bybit-ud"),
+        BrokerLimiter::new(&limits),
+        tx,
+    )
+    .await
+    .expect("ud start");
+    ud.reconcile(&[]).await.expect("reconcile");
+    std::mem::forget(server);
+    (opts, ud, rx)
+}
+
+fn limit_buy() -> PlaceOrderRequest {
+    PlaceOrderRequest {
+        cid: ClientOrderId::new_v4(),
+        instrument: mock(),
+        side: Side::Buy,
+        order_type: OrderType::Limit,
+        qty: Qty::from(10),
+        price: Some(Price::new(dec!(50))),
+    }
+}
+
+fn stop_loss() -> PlaceStopOrderRequest {
+    PlaceStopOrderRequest {
+        cid: ClientOrderId::new_v4(),
+        instrument: mock(),
+        side: Side::Sell,
+        kind: StopOrderKind::StopLoss,
+        qty: Qty::from(10),
+        stop_price: Price::new(dec!(40)),
+        limit_price: None,
+        expiry: StopExpiry::GoodTillCancel,
+    }
+}
+
+fn refuse_next(opts: &MockOptions, status: u16, code: i64, message: &str) {
+    let body =
+        format!(r#"{{"retCode":{code},"retMsg":"{message}","result":{{}},"retExtInfo":{{}}}}"#);
+    *opts.command_refusal.lock().unwrap() = Some((status, body));
+}
+
+/// The limit of the exchange (`10006`) on place is `RateLimited`, sent once, nothing placed. A refusal with a code of the
+/// exchange (`110007`, not enough balance) is `Rejected` with the code, nothing placed. Every cid is used once: after a
+/// sent command, refused or not, the same cid is `duplicate_place`, and a new cid goes through.
+#[tokio::test]
+async fn a_limit_or_a_refusal_on_place_places_nothing_and_the_cid_is_used_up() {
+    let (opts, ud, _rx) = start().await;
+    let commands = || opts.order_commands.load(Ordering::SeqCst);
+    let req = limit_buy();
+    let refused = limit_buy();
+
+    refuse_next(&opts, 200, 10006, "Too many visits!");
+    assert!(matches!(
+        ud.place(req.clone()).await,
+        Err(Error::RateLimited { .. })
+    ));
+    assert_eq!(commands(), 1, "sent once");
+    assert!(ud.active_orders().await.unwrap().is_empty());
+
+    refuse_next(&opts, 200, 110007, "ab not enough for new order");
+    match ud.place(refused.clone()).await {
+        Err(Error::Rejected { code, .. }) => assert_eq!(code, "bybit_110007"),
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+    assert!(ud.active_orders().await.unwrap().is_empty());
+
+    for used in [req, refused] {
+        assert!(matches!(
+            ud.place(used).await,
+            Err(Error::Rejected { ref code, .. }) if code == "duplicate_place"
+        ));
+    }
+    assert_eq!(commands(), 2, "no repeat went out");
+    ud.place(limit_buy()).await.expect("a new cid goes through");
+    assert_eq!(ud.active_orders().await.unwrap().len(), 1);
+}
+
+/// A cancel that fails on the way (HTTP 503) is `Unknown` and not repeated, the order is still alive, and the next cancel
+/// goes through. A cancel at the limit is `RateLimited`.
+#[tokio::test]
+async fn a_cancel_that_hits_a_limit_or_fails_leaves_the_order_alive() {
+    let (opts, ud, _rx) = start().await;
+    let req = limit_buy();
+    let cid = req.cid;
+    ud.place(req).await.unwrap();
+    let before = opts.order_commands.load(Ordering::SeqCst);
+
+    refuse_next(&opts, 200, 10006, "Too many visits!");
+    assert!(matches!(
+        ud.cancel(cid).await,
+        Err(Error::RateLimited { .. })
+    ));
+    refuse_next(&opts, 503, 10016, "unavailable");
+    assert!(matches!(ud.cancel(cid).await, Err(Error::Unknown)));
+    assert_eq!(opts.order_commands.load(Ordering::SeqCst), before + 2);
+    assert!(matches!(
+        ud.order_state(cid).await.unwrap().state,
+        OrderState::Acked { .. }
+    ));
+
+    ud.cancel(cid).await.expect("the cancel after the failures");
+    assert!(matches!(
+        ud.order_state(cid).await.unwrap().state,
+        OrderState::Cancelled { .. }
+    ));
+}
+
+/// A stop order: a limit is `RateLimited` and the cid is used up all the same, a failure on the way is `Unknown`, and
+/// nothing is sent twice. A cancel of a stop order that fails leaves it in the list.
+#[tokio::test]
+async fn a_stop_order_that_hits_a_limit_or_fails_is_not_repeated() {
+    let (opts, ud, _rx) = start().await;
+    let commands = || opts.order_commands.load(Ordering::SeqCst);
+    let req = stop_loss();
+
+    refuse_next(&opts, 200, 10006, "Too many visits!");
+    assert!(matches!(
+        ud.place_stop(req.clone()).await,
+        Err(Error::RateLimited { .. })
+    ));
+    assert!(matches!(
+        ud.place_stop(req).await,
+        Err(Error::Rejected { ref code, .. }) if code == "duplicate_place"
+    ));
+    assert_eq!(commands(), 1, "the repeat never went out");
+
+    let lost = stop_loss();
+    refuse_next(&opts, 503, 10016, "unavailable");
+    let before = commands();
+    assert!(matches!(
+        ud.place_stop(lost.clone()).await,
+        Err(Error::Unknown)
+    ));
+    assert!(matches!(
+        ud.place_stop(lost).await,
+        Err(Error::Rejected { ref code, .. }) if code == "duplicate_place"
+    ));
+    assert_eq!(commands(), before + 1, "the repeat never went out");
+
+    let kept = stop_loss();
+    let kept_cid = kept.cid;
+    ud.place_stop(kept).await.unwrap();
+    refuse_next(&opts, 503, 10016, "unavailable");
+    assert!(matches!(
+        ud.cancel_stop(StopOrderRef::Cid(kept_cid)).await,
+        Err(Error::Unknown)
+    ));
+    assert_eq!(ud.active_stop_orders().await.unwrap().len(), 1);
+}

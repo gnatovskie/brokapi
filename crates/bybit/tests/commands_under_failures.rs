@@ -257,3 +257,37 @@ async fn a_fill_lost_in_the_gap_of_the_socket_is_found_after_the_reconnect() {
     )
     .await;
 }
+
+/// The list of working orders comes in pages of at most 50: a bot with 120 orders gets all 120, once each, and the lists the
+/// bot asks for (`active_orders`, `reconcile`) agree on them.
+#[tokio::test]
+async fn more_orders_than_a_page_are_all_listed() {
+    let (opts, ud, _rx) = start().await;
+    let mut cids = Vec::new();
+    for _ in 0..120 {
+        let req = limit_buy();
+        cids.push(req.cid);
+        ud.place(req).await.unwrap();
+    }
+    let active = ud.active_orders().await.unwrap();
+    assert_eq!(active.len(), 120);
+    let mut seen: Vec<_> = active.iter().map(|o| o.cid).collect();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 120, "every order once");
+    for cid in &cids {
+        assert!(active.iter().any(|o| o.cid == *cid));
+    }
+    let pages = opts
+        .served
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.contains("order/realtime"))
+        .count();
+    assert!(pages >= 3, "120 orders take at least 3 pages, saw {pages}");
+
+    let report = ud.reconcile(&cids).await.unwrap();
+    assert_eq!(report.confirmed.len(), 120, "{report:?}");
+    assert!(report.closed_offline.is_empty() && report.foreign.is_empty());
+}

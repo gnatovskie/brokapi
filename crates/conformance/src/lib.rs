@@ -796,9 +796,16 @@ async fn caught(work: impl Future<Output = ()>) -> String {
                 .with_ansi(false),
         )
         .with(targets);
+    // With a single subscriber registered in the process, tracing asks only the subscriber of the thread
+    // that meets a line first, and caches the answer for all threads. Other tests of the binary run
+    // connectors at the same time with no subscriber, so a line they meet first would be lost here. A
+    // second one, kept alive meanwhile, makes tracing ask every registered subscriber.
+    let second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let guard = tracing::subscriber::set_default(subscriber);
+    tracing::callsite::rebuild_interest_cache();
     work.await;
     drop(guard);
+    drop(second);
     String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).into_owned()
 }
 

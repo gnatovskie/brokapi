@@ -590,6 +590,7 @@ version = "0.1.0-alpha.10"
 dependencies = [
  "async-trait",
  "brokapi-core",
+ "brokapi-redact",
  "brokapi-sansio",
  "serde",
  "serde_json",
@@ -598,6 +599,7 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -50,6 +50,23 @@ brokapi.enable_logging("debug")   # или явно
 Неверный аргумент вызова - ошибка (`BadDirective` в Rust, `ValueError` в Python). Неверная переменная не останавливает
 бота: лог включается на `info`, первой строкой идет предупреждение `log variable ignored`.
 
+## Заявки в логе
+
+Каждая смена состояния заявки - одна строка с ее `cid`:
+
+| Строка | Уровень |
+|---|---|
+| `order acked` (с `broker_order_id`), `order filled`, `order cancelled`, `order rejected` (с `reason`) | `info` |
+| `order partially filled` (с `filled` и `left`) | `debug` |
+| `order outcome unknown`, `no answer to the command in time` | `warn` |
+
+Строка `warn` об исходе заявки значит: заявка у брокера может быть. Команду не повторяйте, вызовите `reconcile`
+(раздел [Если что-то пошло не так](rust/recovery.md)).
+
+```text
+2026-11-20T10:00:01.204518Z  INFO brokapi_runtime::orders: order acked cid=5f0c7a1e-2b0d-4c1e-9a43-3f9d2c1b7e10 broker_order_id=48213377
+```
+
 ## Свой подписчик
 
 Если у программы уже есть свой вывод `tracing`, возьмите только правила уровня, `brokapi::logging::filter`:

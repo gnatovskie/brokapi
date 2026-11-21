@@ -81,6 +81,7 @@ mod price_grid;
 mod reconcile;
 pub mod record;
 mod shutdown;
+pub mod spans;
 mod supervisor;
 
 pub use ack::{AckState, SUBSCRIPTION_REFUSED, not_confirmed, wait_ack};

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use brokapi_core::{ClientOrderId, OrderState};
 use brokapi_sansio::{FsmError, OrderRegistry, OrderSignal};
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 /// Runtime order book: one state machine per client order id, a timeout sweep, and a guard that
 /// never lets the same place command go out twice.
@@ -284,6 +284,9 @@ impl OrderRuntime {
         now: Instant,
     ) -> Result<Option<OrderState>, FsmError> {
         let changed = self.registry.apply(cid, signal, now)?;
+        if let Some(state) = &changed {
+            log_state(state);
+        }
         if let Some(
             OrderState::Filled { .. } | OrderState::Cancelled { .. } | OrderState::Rejected { .. },
         ) = &changed
@@ -299,7 +302,11 @@ impl OrderRuntime {
     /// Returns the orders that changed, with their new state. It does not cancel or retry
     /// anything: the exchange order may well exist.
     pub fn sweep_timeouts(&mut self, now: Instant) -> Vec<(ClientOrderId, OrderState)> {
-        self.registry.on_global_timeout(now, self.command_timeout)
+        let changed = self.registry.on_global_timeout(now, self.command_timeout);
+        for (cid, _) in &changed {
+            warn!(%cid, timeout_ms = self.command_timeout.as_millis() as u64, "no answer to the command in time, order unknown: reconcile");
+        }
+        changed
     }
 
     /// The current state of a tracked order, or `None` for an unknown cid.
@@ -312,11 +319,35 @@ impl OrderRuntime {
     /// Returns the cids that changed. Orders at the broker are untouched, only the local wait for
     /// an answer is given up.
     pub fn abandon_inflight(&mut self, now: Instant) -> Vec<ClientOrderId> {
-        self.registry
+        let abandoned: Vec<ClientOrderId> = self
+            .registry
             .abandon_inflight(now)
             .into_iter()
             .map(|(cid, _)| cid)
-            .collect()
+            .collect();
+        for cid in &abandoned {
+            warn!(%cid, "no answer to the command before shutdown, order unknown");
+        }
+        abandoned
+    }
+}
+
+/// One line for a new state of an order (§16.2): the final states and the ack on `info`, a partial fill on `debug`, an
+/// unknown outcome on `warn`.
+fn log_state(state: &OrderState) {
+    match state {
+        OrderState::Acked { cid, broker_id } => {
+            info!(%cid, broker_order_id = %broker_id.0, "order acked")
+        }
+        OrderState::PartiallyFilled { cid, filled, left } => {
+            debug!(%cid, %filled, %left, "order partially filled")
+        }
+        OrderState::Filled { cid } => info!(%cid, "order filled"),
+        OrderState::Cancelled { cid } => info!(%cid, "order cancelled"),
+        OrderState::Rejected { cid, reason } => info!(%cid, reason = %reason, "order rejected"),
+        OrderState::Unknown { cid, .. } => warn!(%cid, "order outcome unknown: reconcile"),
+        OrderState::InFlight { cid, .. } => debug!(%cid, "order in flight"),
+        _ => debug!(state = ?state, "order state changed"),
     }
 }
 

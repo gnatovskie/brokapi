@@ -49,5 +49,8 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    tokio::spawn(work).await.ok()
+    // The task stays in the span of the caller: its lines show the command and the connector they belong to.
+    tokio::spawn(tracing::Instrument::in_current_span(work))
+        .await
+        .ok()
 }

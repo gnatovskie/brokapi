@@ -81,7 +81,8 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::{Code, Streaming};
-use tracing::{debug, warn};
+use tracing::Instrument as _;
+use tracing::warn;
 
 use crate::core::StreamEvent;
 
@@ -167,7 +168,8 @@ where
     F: Send + 'static,
 {
     let restart = Arc::new(Notify::new());
-    let join = tokio::spawn(run(params, cancel.clone(), Arc::clone(&restart)));
+    // The stream runs in the span of the subscription that opened it, under the span of its connector.
+    let join = tokio::spawn(run(params, cancel.clone(), Arc::clone(&restart)).in_current_span());
     StreamHandle {
         cancel,
         restart,
@@ -256,7 +258,7 @@ where
                             return;
                         }
                         reported_down = true;
-                        debug!(sub = ?p.sub, reason = %why, "stream dropped, reopening");
+                        warn!(sub = ?p.sub, reason = %why, "stream dropped, reopening");
                         // An unauthenticated drop usually means the JWT lapsed.
                         if unauth {
                             p.tokens.request_refresh();

@@ -22,6 +22,7 @@ use brokapi_sansio::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::config::MarketDataConfig;
 use crate::core::md::DEFAULT_DEPTH;
@@ -49,6 +50,8 @@ const MAX_ASSET_PAGES: usize = 200;
 type MdWrap<M> = Arc<dyn Fn(StreamEvent<M>) -> MdFrame + Send + Sync>;
 
 struct MdShared {
+    /// `connector{broker, role, account}`: the tasks run in it, the commands take it as the parent.
+    span: tracing::Span,
     rpc: Rpc,
     core: Arc<Mutex<MdCore>>,
     backpressure: SharedBackpressure,
@@ -195,6 +198,16 @@ impl MarketDataConnector {
         limiter: Arc<BrokerLimiter>,
         out: mpsc::Sender<Envelope>,
     ) -> Result<Self, Error> {
+        let span =
+            brokapi_runtime::spans::connector("finam", brokapi_runtime::spans::Role::Md, None);
+        Self::start_in(cfg, limiter, out).instrument(span).await
+    }
+
+    async fn start_in(
+        cfg: MarketDataConfig,
+        limiter: Arc<BrokerLimiter>,
+        out: mpsc::Sender<Envelope>,
+    ) -> Result<Self, Error> {
         let tokens = cfg.api.resolve_tokens().await?;
         let api = FinamApi::connect(&cfg.api.endpoint, tokens, cfg.api.bearer)
             .map_err(|e| map_protocol_err(&e))?;
@@ -227,19 +240,23 @@ impl MarketDataConnector {
             }
         };
         // Market-data buffers never gate commands, so overflow needs no further reaction.
-        let pump = tokio::spawn(run_pump(
-            PumpIo {
-                rx,
-                out,
-                source: Arc::clone(&cfg.source),
-                backpressure: Arc::clone(&backpressure),
-                cancel: root.child_token(),
-            },
-            handler,
-            Arc::new(|_| {}),
-        ));
+        let pump = brokapi_runtime::spans::spawn_in(
+            &tracing::Span::current(),
+            run_pump(
+                PumpIo {
+                    rx,
+                    out,
+                    source: Arc::clone(&cfg.source),
+                    backpressure: Arc::clone(&backpressure),
+                    cancel: root.child_token(),
+                },
+                handler,
+                Arc::new(|_| {}),
+            ),
+        );
 
         let inner = Arc::new(MdShared {
+            span: tracing::Span::current(),
             rpc: Rpc {
                 api,
                 limiter,
@@ -253,6 +270,7 @@ impl MarketDataConnector {
             root,
             ack_timeout: cfg.subscribe_ack_timeout,
         });
+        brokapi_runtime::spans::started();
         Ok(Self { inner, pump })
     }
 
@@ -369,6 +387,17 @@ impl MarketDataConnector {
     /// # }
     /// ```
     pub async fn shutdown(self, mode: ShutdownMode) -> ShutdownReport {
+        let span = self.inner.span.clone();
+        async move {
+            let report = self.shutdown_in(mode).await;
+            brokapi_runtime::spans::stopped(&report);
+            report
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn shutdown_in(self, mode: ShutdownMode) -> ShutdownReport {
         let handles: Vec<StreamHandle> = self
             .inner
             .streams
@@ -419,47 +448,56 @@ impl MarketDataConnector {
         method: &'static str,
         build: impl FnOnce(SubscriptionId) -> (OpenFn<M>, MdWrap<M>),
     ) -> Result<SubscriptionId, Error> {
-        self.quota_check()?;
-        let id = self.inner.sub_ids.next();
-        let (open, wrap) = build(id);
-        self.inner
-            .backpressure
-            .lock()
-            .expect("backpressure poisoned")
-            .register(id, instrument, opts.backpressure);
-        self.set_core_sub(id, Some(core_kind));
-
-        let (first_tx, first_rx) = oneshot::channel();
-        let handle = spawn_stream(
-            StreamParams {
-                sub: id,
-                method,
-                limiter: Arc::clone(&self.inner.rpc.limiter),
-                tokens: Arc::clone(self.inner.rpc.api.tokens()),
-                open,
-                open_timeout: self.inner.rpc.timeout,
-                wrap,
-                tx: self.inner.frames.clone(),
-                first: Some(first_tx),
-            },
-            self.inner.root.child_token(),
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            Some(&instrument.key),
         );
-        self.inner
-            .streams
-            .lock()
-            .expect("streams poisoned")
-            .insert(id, handle);
+        brokapi_runtime::spans::command(span, async move {
+            self.quota_check()?;
+            let id = self.inner.sub_ids.next();
+            let (open, wrap) = build(id);
+            self.inner
+                .backpressure
+                .lock()
+                .expect("backpressure poisoned")
+                .register(id, instrument, opts.backpressure);
+            self.set_core_sub(id, Some(core_kind));
 
-        // Returns when the broker has opened the stream: what happens after that is delivered. A refusal takes the
-        // subscription back. No answer in time does not: the stream goes on opening in the background (see the
-        // config), because a server may send the headers of a quiet stream only with its first message.
-        match tokio::time::timeout(self.inner.ack_timeout, first_rx).await {
-            Ok(Ok(Err(e))) => {
-                self.drop_sub(id).await;
-                Err(map_protocol_err(&e))
+            let (first_tx, first_rx) = oneshot::channel();
+            let handle = spawn_stream(
+                StreamParams {
+                    sub: id,
+                    method,
+                    limiter: Arc::clone(&self.inner.rpc.limiter),
+                    tokens: Arc::clone(self.inner.rpc.api.tokens()),
+                    open,
+                    open_timeout: self.inner.rpc.timeout,
+                    wrap,
+                    tx: self.inner.frames.clone(),
+                    first: Some(first_tx),
+                },
+                self.inner.root.child_token(),
+            );
+            self.inner
+                .streams
+                .lock()
+                .expect("streams poisoned")
+                .insert(id, handle);
+
+            // Returns when the broker has opened the stream: what happens after that is delivered. A refusal takes the
+            // subscription back. No answer in time does not: the stream goes on opening in the background (see the
+            // config), because a server may send the headers of a quiet stream only with its first message.
+            match tokio::time::timeout(self.inner.ack_timeout, first_rx).await {
+                Ok(Ok(Err(e))) => {
+                    self.drop_sub(id).await;
+                    Err(map_protocol_err(&e))
+                }
+                _ => Ok(id),
             }
-            _ => Ok(id),
-        }
+        })
+        .await
     }
 
     fn set_core_sub(&self, id: SubscriptionId, kind: Option<SubscriptionKind>) {
@@ -636,23 +674,28 @@ impl OrderBookSource for MarketDataConnector {
     ///
     /// See the [type docs](MarketDataConnector) for an example.
     async fn order_book(&self, id: &InstrumentId, depth: u32) -> Result<OrderBook, Error> {
-        let symbol = symbol_of(id)?;
-        let resp = self
-            .inner
-            .rpc
-            .read("OrderBook", |api| {
-                let req = pm::OrderBookRequest {
-                    symbol: symbol.clone(),
-                };
-                async move { api.market_data().order_book(req).await }
-            })
-            .await?;
-        Ok(map_rest_order_book(
-            id,
-            &resp,
-            depth.min(MAX_DEPTH),
-            brokapi_runtime::now(),
-        ))
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            let resp = self
+                .inner
+                .rpc
+                .read("OrderBook", |api| {
+                    let req = pm::OrderBookRequest {
+                        symbol: symbol.clone(),
+                    };
+                    async move { api.market_data().order_book(req).await }
+                })
+                .await?;
+            Ok(map_rest_order_book(
+                id,
+                &resp,
+                depth.min(MAX_DEPTH),
+                brokapi_runtime::now(),
+            ))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Opens an `SubscribeOrderBook` stream. Envelopes carry `Event::OrderBook(OrderBook::Snapshot)`.
@@ -674,33 +717,38 @@ impl OrderBookSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let symbol = symbol_of(id)?;
-        let depth = opts.depth.unwrap_or(MAX_DEPTH).min(MAX_DEPTH);
-        self.register_sub(
-            id.clone(),
-            SubscriptionKind::OrderBook {
-                instrument: id.clone(),
-                depth,
-            },
-            opts,
-            "SubscribeOrderBook",
-            |sub| {
-                let api = self.inner.rpc.api.clone();
-                let open: OpenFn<pm::SubscribeOrderBookResponse> = Arc::new(move || {
-                    let api = api.clone();
-                    let req = pm::SubscribeOrderBookRequest {
-                        symbol: symbol.clone(),
-                    };
-                    Box::pin(async move {
-                        api.market_data()
-                            .subscribe_order_book(req)
-                            .await
-                            .map(|r| r.into_inner())
-                    })
-                });
-                (open, Self::wrap(sub, MdEvent::OrderBook))
-            },
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            let depth = opts.depth.unwrap_or(MAX_DEPTH).min(MAX_DEPTH);
+            self.register_sub(
+                id.clone(),
+                SubscriptionKind::OrderBook {
+                    instrument: id.clone(),
+                    depth,
+                },
+                opts,
+                "SubscribeOrderBook",
+                |sub| {
+                    let api = self.inner.rpc.api.clone();
+                    let open: OpenFn<pm::SubscribeOrderBookResponse> = Arc::new(move || {
+                        let api = api.clone();
+                        let req = pm::SubscribeOrderBookRequest {
+                            symbol: symbol.clone(),
+                        };
+                        Box::pin(async move {
+                            api.market_data()
+                                .subscribe_order_book(req)
+                                .await
+                                .map(|r| r.into_inner())
+                        })
+                    });
+                    (open, Self::wrap(sub, MdEvent::OrderBook))
+                },
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -712,14 +760,23 @@ impl OrderBookSource for MarketDataConnector {
     /// [`Error::Rejected`] with code `unknown_subscription` when `sub` is not a live subscription of
     /// this connector (a second `unsubscribe` of the same id ends here).
     async fn unsubscribe(&self, sub: SubscriptionId) -> Result<(), Error> {
-        if self.drop_sub(sub).await {
-            Ok(())
-        } else {
-            Err(Error::Rejected {
-                code: "unknown_subscription".into(),
-                message: format!("subscription {} is not active", sub.value()),
-            })
-        }
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Unsubscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            if self.drop_sub(sub).await {
+                Ok(())
+            } else {
+                Err(Error::Rejected {
+                    code: "unknown_subscription".into(),
+                    message: format!("subscription {} is not active", sub.value()),
+                })
+            }
+        })
+        .await
     }
 }
 
@@ -733,26 +790,31 @@ impl MarketDataSource for MarketDataConnector {
     ///
     /// The same as [`order_book`](OrderBookSource::order_book).
     async fn last_trades(&self, id: &InstrumentId, limit: u32) -> Result<Vec<MarketTrade>, Error> {
-        let symbol = symbol_of(id)?;
-        let resp = self
-            .inner
-            .rpc
-            .read("LatestTrades", |api| {
-                let req = pm::LatestTradesRequest {
-                    symbol: symbol.clone(),
-                };
-                async move { api.market_data().latest_trades(req).await }
-            })
-            .await?;
-        let now = brokapi_runtime::now();
-        let mut trades: Vec<MarketTrade> = resp
-            .trades
-            .iter()
-            .filter_map(|t| map_trade(id, t, now))
-            .collect();
-        // Newest `limit`, oldest first.
-        let skip = trades.len().saturating_sub(limit as usize);
-        Ok(trades.split_off(skip))
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            let resp = self
+                .inner
+                .rpc
+                .read("LatestTrades", |api| {
+                    let req = pm::LatestTradesRequest {
+                        symbol: symbol.clone(),
+                    };
+                    async move { api.market_data().latest_trades(req).await }
+                })
+                .await?;
+            let now = brokapi_runtime::now();
+            let mut trades: Vec<MarketTrade> = resp
+                .trades
+                .iter()
+                .filter_map(|t| map_trade(id, t, now))
+                .collect();
+            // Newest `limit`, oldest first.
+            let skip = trades.len().saturating_sub(limit as usize);
+            Ok(trades.split_off(skip))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Opens a `SubscribeLatestTrades` stream. Trades seen before are not repeated after a reconnect
@@ -762,31 +824,36 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let symbol = symbol_of(id)?;
-        self.register_sub(
-            id.clone(),
-            SubscriptionKind::LastTrades {
-                instrument: id.clone(),
-            },
-            opts,
-            "SubscribeLatestTrades",
-            |sub| {
-                let api = self.inner.rpc.api.clone();
-                let open: OpenFn<pm::SubscribeLatestTradesResponse> = Arc::new(move || {
-                    let api = api.clone();
-                    let req = pm::SubscribeLatestTradesRequest {
-                        symbol: symbol.clone(),
-                    };
-                    Box::pin(async move {
-                        api.market_data()
-                            .subscribe_latest_trades(req)
-                            .await
-                            .map(|r| r.into_inner())
-                    })
-                });
-                (open, Self::wrap(sub, MdEvent::Trades))
-            },
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            self.register_sub(
+                id.clone(),
+                SubscriptionKind::LastTrades {
+                    instrument: id.clone(),
+                },
+                opts,
+                "SubscribeLatestTrades",
+                |sub| {
+                    let api = self.inner.rpc.api.clone();
+                    let open: OpenFn<pm::SubscribeLatestTradesResponse> = Arc::new(move || {
+                        let api = api.clone();
+                        let req = pm::SubscribeLatestTradesRequest {
+                            symbol: symbol.clone(),
+                        };
+                        Box::pin(async move {
+                            api.market_data()
+                                .subscribe_latest_trades(req)
+                                .await
+                                .map(|r| r.into_inner())
+                        })
+                    });
+                    (open, Self::wrap(sub, MdEvent::Trades))
+                },
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -798,31 +865,36 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let symbol = symbol_of(id)?;
-        self.register_sub(
-            id.clone(),
-            SubscriptionKind::Quotes {
-                instrument: id.clone(),
-            },
-            opts,
-            "SubscribeQuote",
-            |sub| {
-                let api = self.inner.rpc.api.clone();
-                let open: OpenFn<pm::SubscribeQuoteResponse> = Arc::new(move || {
-                    let api = api.clone();
-                    let req = pm::SubscribeQuoteRequest {
-                        symbols: vec![symbol.clone()],
-                    };
-                    Box::pin(async move {
-                        api.market_data()
-                            .subscribe_quote(req)
-                            .await
-                            .map(|r| r.into_inner())
-                    })
-                });
-                (open, Self::wrap(sub, MdEvent::Quotes))
-            },
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            self.register_sub(
+                id.clone(),
+                SubscriptionKind::Quotes {
+                    instrument: id.clone(),
+                },
+                opts,
+                "SubscribeQuote",
+                |sub| {
+                    let api = self.inner.rpc.api.clone();
+                    let open: OpenFn<pm::SubscribeQuoteResponse> = Arc::new(move || {
+                        let api = api.clone();
+                        let req = pm::SubscribeQuoteRequest {
+                            symbols: vec![symbol.clone()],
+                        };
+                        Box::pin(async move {
+                            api.market_data()
+                                .subscribe_quote(req)
+                                .await
+                                .map(|r| r.into_inner())
+                        })
+                    });
+                    (open, Self::wrap(sub, MdEvent::Quotes))
+                },
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -842,37 +914,42 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         range: TimeRange,
     ) -> Result<Vec<Candle>, Error> {
-        let symbol = symbol_of(id)?;
-        let timeframe = wire_timeframe(tf)? as i32;
-        // M10 is built from M5: the range starts at the 10-minute boundary, so the first candle
-        // does not lose its first half.
-        let range = if tf == Timeframe::M10 {
-            TimeRange::new(floor_m10(range.from), range.to)
-        } else {
-            range
-        };
-        let resp = self
-            .inner
-            .rpc
-            .read("Bars", |api| {
-                let req = pm::BarsRequest {
-                    symbol: symbol.clone(),
-                    timeframe,
-                    interval: Some(history_interval(range)),
-                };
-                async move { api.market_data().bars(req).await }
-            })
-            .await?;
-        let now = brokapi_runtime::now();
-        if tf == Timeframe::M10 {
-            let m5: Vec<Candle> = resp
-                .bars
-                .iter()
-                .map(|b| map_bar(id, Timeframe::M5, b, now))
-                .collect();
-            return Ok(merge_m5(&m5));
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            let timeframe = wire_timeframe(tf)? as i32;
+            // M10 is built from M5: the range starts at the 10-minute boundary, so the first candle
+            // does not lose its first half.
+            let range = if tf == Timeframe::M10 {
+                TimeRange::new(floor_m10(range.from), range.to)
+            } else {
+                range
+            };
+            let resp = self
+                .inner
+                .rpc
+                .read("Bars", |api| {
+                    let req = pm::BarsRequest {
+                        symbol: symbol.clone(),
+                        timeframe,
+                        interval: Some(history_interval(range)),
+                    };
+                    async move { api.market_data().bars(req).await }
+                })
+                .await?;
+            let now = brokapi_runtime::now();
+            if tf == Timeframe::M10 {
+                let m5: Vec<Candle> = resp
+                    .bars
+                    .iter()
+                    .map(|b| map_bar(id, Timeframe::M5, b, now))
+                    .collect();
+                return Ok(merge_m5(&m5));
+            }
+            Ok(resp.bars.iter().map(|b| map_bar(id, tf, b, now)).collect())
         }
-        Ok(resp.bars.iter().map(|b| map_bar(id, tf, b, now)).collect())
+        .instrument(span)
+        .await
     }
 
     /// 500 bars of the timeframe. The Finam documentation of `Bars` states no limit, so this is a
@@ -891,35 +968,40 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let symbol = symbol_of(id)?;
-        // M10: the wire stream is M5, the core builds the 10-minute candle.
-        let timeframe = wire_timeframe(tf)? as i32;
-        self.register_sub(
-            id.clone(),
-            SubscriptionKind::LastCandle {
-                instrument: id.clone(),
-                timeframe: tf,
-            },
-            opts,
-            "SubscribeBars",
-            |sub| {
-                let api = self.inner.rpc.api.clone();
-                let open: OpenFn<pm::SubscribeBarsResponse> = Arc::new(move || {
-                    let api = api.clone();
-                    let req = pm::SubscribeBarsRequest {
-                        symbol: symbol.clone(),
-                        timeframe,
-                    };
-                    Box::pin(async move {
-                        api.market_data()
-                            .subscribe_bars(req)
-                            .await
-                            .map(|r| r.into_inner())
-                    })
-                });
-                (open, Self::wrap(sub, MdEvent::Bars))
-            },
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            // M10: the wire stream is M5, the core builds the 10-minute candle.
+            let timeframe = wire_timeframe(tf)? as i32;
+            self.register_sub(
+                id.clone(),
+                SubscriptionKind::LastCandle {
+                    instrument: id.clone(),
+                    timeframe: tf,
+                },
+                opts,
+                "SubscribeBars",
+                |sub| {
+                    let api = self.inner.rpc.api.clone();
+                    let open: OpenFn<pm::SubscribeBarsResponse> = Arc::new(move || {
+                        let api = api.clone();
+                        let req = pm::SubscribeBarsRequest {
+                            symbol: symbol.clone(),
+                            timeframe,
+                        };
+                        Box::pin(async move {
+                            api.market_data()
+                                .subscribe_bars(req)
+                                .await
+                                .map(|r| r.into_inner())
+                        })
+                    });
+                    (open, Self::wrap(sub, MdEvent::Bars))
+                },
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 }
@@ -938,42 +1020,47 @@ impl InstrumentSource for MarketDataConnector {
     /// [`Error::Rejected`] (a symbol the broker does not know is `not_found`), [`Error::RateLimited`],
     /// [`Error::Transport`] (also when the directory has more pages than the safety bound of 200).
     async fn find(&self, q: InstrumentQuery) -> Result<Vec<Instrument>, Error> {
-        match q {
-            InstrumentQuery::ByTicker {
-                ticker,
-                exchange: Some(mic),
-            } => {
-                let symbol = format!("{ticker}@{mic}");
-                Ok(vec![map_get_asset(
-                    &symbol,
-                    &self.get_asset(&symbol).await?,
-                )])
+        let span = self.inner.span.clone();
+        async move {
+            match q {
+                InstrumentQuery::ByTicker {
+                    ticker,
+                    exchange: Some(mic),
+                } => {
+                    let symbol = format!("{ticker}@{mic}");
+                    Ok(vec![map_get_asset(
+                        &symbol,
+                        &self.get_asset(&symbol).await?,
+                    )])
+                }
+                InstrumentQuery::ByTicker {
+                    ticker,
+                    exchange: None,
+                } => Ok(self
+                    .all_assets()
+                    .await?
+                    .iter()
+                    .filter(|a| a.ticker.eq_ignore_ascii_case(&ticker))
+                    .map(map_asset)
+                    .collect()),
+                InstrumentQuery::ByIsin(isin) => Ok(self
+                    .all_assets()
+                    .await?
+                    .iter()
+                    .filter(|a| a.isin.eq_ignore_ascii_case(&isin))
+                    .map(map_asset)
+                    .collect()),
+                InstrumentQuery::ByKind(kind) => Ok(self
+                    .all_assets()
+                    .await?
+                    .iter()
+                    .filter(|a| kind_from_type(&a.r#type) == kind)
+                    .map(map_asset)
+                    .collect()),
             }
-            InstrumentQuery::ByTicker {
-                ticker,
-                exchange: None,
-            } => Ok(self
-                .all_assets()
-                .await?
-                .iter()
-                .filter(|a| a.ticker.eq_ignore_ascii_case(&ticker))
-                .map(map_asset)
-                .collect()),
-            InstrumentQuery::ByIsin(isin) => Ok(self
-                .all_assets()
-                .await?
-                .iter()
-                .filter(|a| a.isin.eq_ignore_ascii_case(&isin))
-                .map(map_asset)
-                .collect()),
-            InstrumentQuery::ByKind(kind) => Ok(self
-                .all_assets()
-                .await?
-                .iter()
-                .filter(|a| kind_from_type(&a.r#type) == kind)
-                .map(map_asset)
-                .collect()),
         }
+        .instrument(span)
+        .await
     }
 
     /// One `GetAsset`: name, ISIN, kind and currency of the instrument.
@@ -983,8 +1070,13 @@ impl InstrumentSource for MarketDataConnector {
     /// [`Error::Config`] for a native id that is not `SymbolMic`. [`Error::Rejected`] when the broker
     /// does not know the symbol. [`Error::RateLimited`] and [`Error::Transport`] as for any read.
     async fn get(&self, id: &InstrumentId) -> Result<Instrument, Error> {
-        let symbol = symbol_of(id)?;
-        Ok(map_get_asset(&symbol, &self.get_asset(&symbol).await?))
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            Ok(map_get_asset(&symbol, &self.get_asset(&symbol).await?))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Trading parameters from `GetAsset` (price step, lot size and the like). The library does not
@@ -995,12 +1087,17 @@ impl InstrumentSource for MarketDataConnector {
     /// above 0, it replaces `lot_size` and `min_qty`. If it is 0, missing, or the broker refuses that call, the
     /// lot of `GetAsset` stays. Not verified live: it is not known when the two differ.
     async fn trading_params(&self, id: &InstrumentId) -> Result<TradingParams, Error> {
-        let symbol = symbol_of(id)?;
-        let mut params = map_trading_params(&symbol, &self.get_asset(&symbol).await?);
-        if let Some(lot) = self.trade_lot_size(&symbol).await? {
-            apply_trade_lot_size(&mut params, lot);
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            let mut params = map_trading_params(&symbol, &self.get_asset(&symbol).await?);
+            if let Some(lot) = self.trade_lot_size(&symbol).await? {
+                apply_trade_lot_size(&mut params, lot);
+            }
+            Ok(params)
         }
-        Ok(params)
+        .instrument(span)
+        .await
     }
 
     /// Derived from the instrument's schedule: Finam has no direct status call.
@@ -1008,16 +1105,21 @@ impl InstrumentSource for MarketDataConnector {
     /// Inside a session that is not of the closed type the status is open, otherwise closed. An empty
     /// schedule gives `Unknown`. Errors as in `get`.
     async fn trading_status(&self, id: &InstrumentId) -> Result<TradingStatus, Error> {
-        let symbol = symbol_of(id)?;
-        let sched = self.schedule_of(&symbol).await?;
-        let now = now_nanos();
-        let (availability, reason) = availability_at(&sched, now);
-        Ok(TradingStatus {
-            instrument: id.clone(),
-            availability,
-            reason,
-            ts: Some(now),
-        })
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = symbol_of(id)?;
+            let sched = self.schedule_of(&symbol).await?;
+            let now = now_nanos();
+            let (availability, reason) = availability_at(&sched, now);
+            Ok(TradingStatus {
+                instrument: id.clone(),
+                availability,
+                reason,
+                ts: Some(now),
+            })
+        }
+        .instrument(span)
+        .await
     }
 
     /// Finam schedules are per instrument, so `exchange` must be a symbol (`SBER@MISX`).
@@ -1028,18 +1130,23 @@ impl InstrumentSource for MarketDataConnector {
     ///
     /// [`Error::Config`] when `exchange` has no `@` (nothing is sent). Otherwise as in `get`.
     async fn schedule(&self, exchange: &str, range: TimeRange) -> Result<Schedule, Error> {
-        if !exchange.contains('@') {
-            return Err(Error::Config(ConfigError::Message(
-                "Finam schedule is per instrument: pass SYMBOL@MIC as `exchange`".into(),
-            )));
+        let span = self.inner.span.clone();
+        async move {
+            if !exchange.contains('@') {
+                return Err(Error::Config(ConfigError::Message(
+                    "Finam schedule is per instrument: pass SYMBOL@MIC as `exchange`".into(),
+                )));
+            }
+            let resp = self.schedule_of(exchange).await?;
+            Ok(map_schedule(
+                exchange,
+                &resp,
+                range.from,
+                range.to,
+                brokapi_runtime::now(),
+            ))
         }
-        let resp = self.schedule_of(exchange).await?;
-        Ok(map_schedule(
-            exchange,
-            &resp,
-            range.from,
-            range.to,
-            brokapi_runtime::now(),
-        ))
+        .instrument(span)
+        .await
     }
 }

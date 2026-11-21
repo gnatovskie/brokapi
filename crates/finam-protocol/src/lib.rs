@@ -58,5 +58,7 @@ pub mod pb {
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/descriptor.bin"));
 
 pub use auth::{GrpcTokenApi, TokenApi, TokenInfo, TokenManager};
-pub use client::{ApiEndpoint, Authorized, DEFAULT_ENDPOINT, FinamApi, start_token_manager};
+pub use client::{
+    ApiEndpoint, Authorized, DEFAULT_ENDPOINT, FinamApi, Logged, start_token_manager,
+};
 pub use error::FinamError;

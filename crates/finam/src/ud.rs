@@ -23,6 +23,7 @@ use brokapi_runtime::{
 use brokapi_sansio::{BrokerCore, CoreEvent, EventSink};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tracing::Instrument as _;
 use tracing::warn;
 
 use crate::cid::FinamCidCodec;
@@ -76,6 +77,8 @@ impl SentCids {
 }
 
 struct UdShared {
+    /// `connector{broker, role, account}`: the tasks run in it, the commands take it as the parent.
+    span: tracing::Span,
     rpc: Rpc,
     account_id: String,
     core: Arc<Mutex<UdCore>>,
@@ -376,6 +379,19 @@ impl UserDataConnector {
         limiter: Arc<BrokerLimiter>,
         out: mpsc::Sender<Envelope>,
     ) -> Result<Self, Error> {
+        let span = brokapi_runtime::spans::connector(
+            "finam",
+            brokapi_runtime::spans::Role::Ud,
+            Some(&cfg.account_id),
+        );
+        Self::start_in(cfg, limiter, out).instrument(span).await
+    }
+
+    async fn start_in(
+        cfg: UserDataConfig,
+        limiter: Arc<BrokerLimiter>,
+        out: mpsc::Sender<Envelope>,
+    ) -> Result<Self, Error> {
         cfg.check()?;
         // A lossy cid format is a configuration error at startup, not a runtime degradation.
         FinamCidCodec.validate()?;
@@ -442,19 +458,23 @@ impl UserDataConnector {
             })
         };
         let cancel = shutdown.lock().expect("shutdown poisoned").child_token();
-        let pump = tokio::spawn(run_pump(
-            PumpIo {
-                rx,
-                out,
-                source: Arc::clone(&cfg.source),
-                backpressure: Arc::clone(&backpressure),
-                cancel,
-            },
-            handler,
-            on_overflow,
-        ));
+        let pump = brokapi_runtime::spans::spawn_in(
+            &tracing::Span::current(),
+            run_pump(
+                PumpIo {
+                    rx,
+                    out,
+                    source: Arc::clone(&cfg.source),
+                    backpressure: Arc::clone(&backpressure),
+                    cancel,
+                },
+                handler,
+                on_overflow,
+            ),
+        );
 
         let inner = Arc::new(UdShared {
+            span: tracing::Span::current(),
             rpc: Rpc {
                 api,
                 limiter,
@@ -486,7 +506,7 @@ impl UserDataConnector {
                     .expect("shutdown poisoned")
                     .child_token(),
             );
-            tokio::spawn(async move {
+            brokapi_runtime::spans::spawn_in(&tracing::Span::current(), async move {
                 let mut tick = tokio::time::interval(Duration::from_secs(5));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
@@ -508,6 +528,7 @@ impl UserDataConnector {
                 }
             });
         }
+        brokapi_runtime::spans::started();
         Ok(Self { inner, pump })
     }
 
@@ -722,6 +743,17 @@ impl UserDataConnector {
     /// # }
     /// ```
     pub async fn shutdown(self, mode: ShutdownMode) -> ShutdownReport {
+        let span = self.inner.span.clone();
+        async move {
+            let report = self.shutdown_in(mode).await;
+            brokapi_runtime::spans::stopped(&report);
+            report
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn shutdown_in(self, mode: ShutdownMode) -> ShutdownReport {
         // Step 1: no new commands.
         self.inner
             .shutdown
@@ -821,80 +853,89 @@ impl UserDataConnector {
         method: &'static str,
         build: impl FnOnce(SubscriptionId) -> (OpenFn<M>, UdWrap<M>),
     ) -> Result<SubscriptionId, Error> {
-        let max = self.inner.rpc.limiter.conn_quota().max_subs_per_conn;
-        if self.inner.streams.lock().expect("streams poisoned").len() >= max {
-            return Err(Error::Rejected {
-                code: "subscription_quota".into(),
-                message: format!("at most {max} streams per connection"),
-            });
-        }
-        let id = self.inner.sub_ids.next();
-        let (open, wrap) = build(id);
-        self.inner
-            .backpressure
-            .lock()
-            .expect("backpressure poisoned")
-            .register(id, no_instrument(), opts.backpressure);
-        self.inner
-            .core
-            .lock()
-            .expect("core poisoned")
-            .register(id, kind);
-
-        let (first_tx, first_rx) = oneshot::channel();
-        let cancel = self
-            .inner
-            .shutdown
-            .lock()
-            .expect("shutdown poisoned")
-            .child_token();
-        let handle = spawn_stream(
-            StreamParams {
-                sub: id,
-                method,
-                limiter: Arc::clone(&self.inner.rpc.limiter),
-                tokens: Arc::clone(self.inner.rpc.api.tokens()),
-                open,
-                open_timeout: self.inner.rpc.timeout,
-                wrap,
-                tx: self.inner.frames.clone(),
-                first: Some(first_tx),
-            },
-            cancel,
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            None,
         );
-        self.inner
-            .streams
-            .lock()
-            .expect("streams poisoned")
-            .insert(id, handle);
+        brokapi_runtime::spans::command(span, async move {
+            let max = self.inner.rpc.limiter.conn_quota().max_subs_per_conn;
+            if self.inner.streams.lock().expect("streams poisoned").len() >= max {
+                return Err(Error::Rejected {
+                    code: "subscription_quota".into(),
+                    message: format!("at most {max} streams per connection"),
+                });
+            }
+            let id = self.inner.sub_ids.next();
+            let (open, wrap) = build(id);
+            self.inner
+                .backpressure
+                .lock()
+                .expect("backpressure poisoned")
+                .register(id, no_instrument(), opts.backpressure);
+            self.inner
+                .core
+                .lock()
+                .expect("core poisoned")
+                .register(id, kind);
 
-        // Returns when the broker has opened the stream: what happens after that is delivered. A refusal takes the
-        // subscription back. No answer in time does not: the stream goes on opening in the background (see the
-        // config), because a server may send the headers of a quiet stream only with its first message.
-        let failure = match tokio::time::timeout(self.inner.ack_timeout, first_rx).await {
-            Ok(Ok(Err(e))) => map_protocol_err(&e),
-            _ => return Ok(id),
-        };
-        let h = self
-            .inner
-            .streams
-            .lock()
-            .expect("streams poisoned")
-            .remove(&id);
-        if let Some(h) = h {
-            h.stop(Duration::from_secs(2)).await;
-        }
-        self.inner
-            .core
-            .lock()
-            .expect("core poisoned")
-            .unregister(id);
-        self.inner
-            .backpressure
-            .lock()
-            .expect("backpressure poisoned")
-            .unregister(id);
-        Err(failure)
+            let (first_tx, first_rx) = oneshot::channel();
+            let cancel = self
+                .inner
+                .shutdown
+                .lock()
+                .expect("shutdown poisoned")
+                .child_token();
+            let handle = spawn_stream(
+                StreamParams {
+                    sub: id,
+                    method,
+                    limiter: Arc::clone(&self.inner.rpc.limiter),
+                    tokens: Arc::clone(self.inner.rpc.api.tokens()),
+                    open,
+                    open_timeout: self.inner.rpc.timeout,
+                    wrap,
+                    tx: self.inner.frames.clone(),
+                    first: Some(first_tx),
+                },
+                cancel,
+            );
+            self.inner
+                .streams
+                .lock()
+                .expect("streams poisoned")
+                .insert(id, handle);
+
+            // Returns when the broker has opened the stream: what happens after that is delivered. A refusal takes the
+            // subscription back. No answer in time does not: the stream goes on opening in the background (see the
+            // config), because a server may send the headers of a quiet stream only with its first message.
+            let failure = match tokio::time::timeout(self.inner.ack_timeout, first_rx).await {
+                Ok(Ok(Err(e))) => map_protocol_err(&e),
+                _ => return Ok(id),
+            };
+            let h = self
+                .inner
+                .streams
+                .lock()
+                .expect("streams poisoned")
+                .remove(&id);
+            if let Some(h) = h {
+                h.stop(Duration::from_secs(2)).await;
+            }
+            self.inner
+                .core
+                .lock()
+                .expect("core poisoned")
+                .unregister(id);
+            self.inner
+                .backpressure
+                .lock()
+                .expect("backpressure poisoned")
+                .unregister(id);
+            Err(failure)
+        })
+        .await
     }
 
     fn wrap<M: Send + 'static>(sub: SubscriptionId, data: fn(M) -> UdEvent) -> UdWrap<M> {
@@ -959,95 +1000,104 @@ impl OrderExecutor for UserDataConnector {
     ///
     /// See the [type docs](UserDataConnector) for an example with a refusal.
     async fn place(&self, req: PlaceOrderRequest) -> Result<OrderAck, Error> {
-        self.check_command()?;
-        let body = build_place_order(&self.inner.account_id, &req)?;
-        // Before a quota is spent or the cid is marked.
-        self.inner
-            .price_grid
-            .check_qty(&req.instrument.key, req.qty)?;
-        if let Some(p) = req.price {
-            self.inner.price_grid.check(&req.instrument.key, p)?;
-        }
-        // Quota first: a refusal here means nothing was registered and the cid stays usable.
-        self.inner.rpc.acquire("PlaceOrder")?;
-        // Waits for earlier commands on this instrument, released on every exit path.
-        let _instrument = self.inner.locks.lock(&req.instrument).await;
-        // The gate may have closed while this command stood in the queue (degraded, shutdown): ask again
-        // before the cid is marked and anything is sent.
-        self.check_command()?;
-        self.inner.locks.bind(req.cid, &req.instrument);
-        {
-            let mut core = self.inner.core.lock().expect("core poisoned");
-            // Spec 7.2: the library never sends the same place twice.
-            if !core.orders().try_place_once(req.cid) {
-                return Err(Error::Rejected {
-                    code: "duplicate_place".into(),
-                    message: "auto-retry of place is forbidden".into(),
-                });
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Place,
+            Some(req.cid),
+            Some(&req.instrument.key),
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.check_command()?;
+            let body = build_place_order(&self.inner.account_id, &req)?;
+            // Before a quota is spent or the cid is marked.
+            self.inner
+                .price_grid
+                .check_qty(&req.instrument.key, req.qty)?;
+            if let Some(p) = req.price {
+                self.inner.price_grid.check(&req.instrument.key, p)?;
             }
-            core.orders()
-                .register_place(req.cid, brokapi_runtime::now());
-        }
-        self.inner.index.know(req.cid);
+            // Quota first: a refusal here means nothing was registered and the cid stays usable.
+            self.inner.rpc.acquire("PlaceOrder")?;
+            // Waits for earlier commands on this instrument, released on every exit path.
+            let _instrument = self.inner.locks.lock(&req.instrument).await;
+            // The gate may have closed while this command stood in the queue (degraded, shutdown): ask again
+            // before the cid is marked and anything is sent.
+            self.check_command()?;
+            self.inner.locks.bind(req.cid, &req.instrument);
+            {
+                let mut core = self.inner.core.lock().expect("core poisoned");
+                // Spec 7.2: the library never sends the same place twice.
+                if !core.orders().try_place_once(req.cid) {
+                    return Err(Error::Rejected {
+                        code: "duplicate_place".into(),
+                        message: "auto-retry of place is forbidden".into(),
+                    });
+                }
+                core.orders()
+                    .register_place(req.cid, brokapi_runtime::now());
+            }
+            self.inner.index.know(req.cid);
 
-        let cid = req.cid;
-        let inner = Arc::clone(&self.inner);
-        // From here the cid is marked and the order is in flight. The request, the answer and the update of
-        // the order run as a task of their own: if the caller drops this future, the task still ends and
-        // the order does not stay in flight for ever.
-        let work = async move {
-            let _instrument = _instrument;
-            let sent = inner
-                .rpc
-                .send_command(|api| {
-                    let body = body.clone();
-                    async move { api.orders().place_order(body).await }
-                })
-                .await;
-            match sent {
-                Ok(os) => {
-                    if let Some(rej) = rejection_of(&os) {
+            let cid = req.cid;
+            let inner = Arc::clone(&self.inner);
+            // From here the cid is marked and the order is in flight. The request, the answer and the update of
+            // the order run as a task of their own: if the caller drops this future, the task still ends and
+            // the order does not stay in flight for ever.
+            let work = async move {
+                let _instrument = _instrument;
+                let sent = inner
+                    .rpc
+                    .send_command(|api| {
+                        let body = body.clone();
+                        async move { api.orders().place_order(body).await }
+                    })
+                    .await;
+                match sent {
+                    Ok(os) => {
+                        if let Some(rej) = rejection_of(&os) {
+                            inner
+                                .signal(
+                                    cid,
+                                    OrderSignal::Rejected {
+                                        reason: rej.to_string(),
+                                    },
+                                )
+                                .await;
+                            return Err(rej);
+                        }
+                        if os.order_id.is_empty() {
+                            inner.signal(cid, OrderSignal::Timeout).await;
+                            return Err(Error::Unknown);
+                        }
+                        inner.index.bind(cid, &os.order_id);
+                        let broker_id = brokapi_core::BrokerOrderId::new(os.order_id.clone());
                         inner
                             .signal(
                                 cid,
-                                OrderSignal::Rejected {
-                                    reason: rej.to_string(),
+                                OrderSignal::Ack {
+                                    broker_id: broker_id.clone(),
                                 },
                             )
                             .await;
-                        return Err(rej);
-                    }
-                    if os.order_id.is_empty() {
-                        inner.signal(cid, OrderSignal::Timeout).await;
-                        return Err(Error::Unknown);
-                    }
-                    inner.index.bind(cid, &os.order_id);
-                    let broker_id = brokapi_core::BrokerOrderId::new(os.order_id.clone());
-                    inner
-                        .signal(
+                        Ok(OrderAck {
                             cid,
-                            OrderSignal::Ack {
-                                broker_id: broker_id.clone(),
-                            },
-                        )
-                        .await;
-                    Ok(OrderAck {
-                        cid,
-                        broker_id,
-                        ts: timestamps(
-                            os.accept_at.as_ref().or(os.transact_at.as_ref()),
-                            brokapi_runtime::now(),
-                        ),
-                    })
+                            broker_id,
+                            ts: timestamps(
+                                os.accept_at.as_ref().or(os.transact_at.as_ref()),
+                                brokapi_runtime::now(),
+                            ),
+                        })
+                    }
+                    Err(e) => Err(inner.command_failed(cid, &e).await),
                 }
-                Err(e) => Err(inner.command_failed(cid, &e).await),
+            };
+            match brokapi_runtime::run_detached(work).await {
+                Some(result) => result,
+                // The task was torn down with the runtime: the order may exist.
+                None => Err(Error::Unknown),
             }
-        };
-        match brokapi_runtime::run_detached(work).await {
-            Some(result) => result,
-            // The task was torn down with the runtime: the order may exist.
-            None => Err(Error::Unknown),
-        }
+        })
+        .await
     }
 
     /// Sends a `CancelOrder` for the order of `cid`.
@@ -1067,30 +1117,39 @@ impl OrderExecutor for UserDataConnector {
     ///   (code `not_found`).
     /// - [`Error::Unknown`]: no answer. The cancel may or may not have been applied. Read the order state.
     async fn cancel(&self, cid: ClientOrderId) -> Result<(), Error> {
-        self.check_command()?;
-        self.inner.rpc.acquire("CancelOrder")?;
-        // The instrument comes from the orders this process placed; an older order is not serialized.
-        let _instrument = self.inner.locks.lock_cid(cid).await;
-        // The gate may have closed while this command stood in the queue.
-        self.check_command()?;
-        let order_id = self.order_id_of(cid).await?;
-        let account = self.account();
-        let sent = self
-            .inner
-            .rpc
-            .send_command(|api| {
-                let req = po::CancelOrderRequest {
-                    account_id: account.clone(),
-                    order_id: order_id.clone(),
-                };
-                async move { api.orders().cancel_order(req).await }
-            })
-            .await;
-        match sent {
-            Ok(_) => Ok(()),
-            // The cancel may or may not have been applied: Unknown, resolved by order_state.
-            Err(e) => Err(map_command_err(&e)),
-        }
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Cancel,
+            Some(cid),
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.check_command()?;
+            self.inner.rpc.acquire("CancelOrder")?;
+            // The instrument comes from the orders this process placed; an older order is not serialized.
+            let _instrument = self.inner.locks.lock_cid(cid).await;
+            // The gate may have closed while this command stood in the queue.
+            self.check_command()?;
+            let order_id = self.order_id_of(cid).await?;
+            let account = self.account();
+            let sent = self
+                .inner
+                .rpc
+                .send_command(|api| {
+                    let req = po::CancelOrderRequest {
+                        account_id: account.clone(),
+                        order_id: order_id.clone(),
+                    };
+                    async move { api.orders().cancel_order(req).await }
+                })
+                .await;
+            match sent {
+                Ok(_) => Ok(()),
+                // The cancel may or may not have been applied: Unknown, resolved by order_state.
+                Err(e) => Err(map_command_err(&e)),
+            }
+        })
+        .await
     }
 
     /// Finam has no replace/amend call, so this is `Unsupported` (and `caps().supports_replace` is false).
@@ -1100,7 +1159,14 @@ impl OrderExecutor for UserDataConnector {
     ///
     /// Always [`Error::Unsupported`] (capability `replace_order`). Nothing is sent.
     async fn replace(&self, _req: ReplaceOrderRequest) -> Result<OrderAck, Error> {
-        Err(unsupported("replace_order"))
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Replace,
+            Some(_req.cid),
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move { Err(unsupported("replace_order")) })
+            .await
     }
 
     /// Reads one order (`GetOrder`) and reports its state under `cid`. This is the way to resolve an
@@ -1114,21 +1180,26 @@ impl OrderExecutor for UserDataConnector {
     ///   `Unknown` place this means the order did not arrive (or is not visible yet, not verified).
     /// - [`Error::RateLimited`], [`Error::Transport`]: as for any read.
     async fn order_state(&self, cid: ClientOrderId) -> Result<OrderSnapshot, Error> {
-        let order_id = self.order_id_of(cid).await?;
-        let account = self.account();
-        let os = self
-            .inner
-            .rpc
-            .read("GetOrder", |api| {
-                let req = po::GetOrderRequest {
-                    account_id: account.clone(),
-                    order_id: order_id.clone(),
-                };
-                async move { api.orders().get_order(req).await }
-            })
-            .await?;
-        let mut core = self.inner.core.lock().expect("core poisoned");
-        Ok(core.ingest_order(&os, brokapi_runtime::now()))
+        let span = self.inner.span.clone();
+        async move {
+            let order_id = self.order_id_of(cid).await?;
+            let account = self.account();
+            let os = self
+                .inner
+                .rpc
+                .read("GetOrder", |api| {
+                    let req = po::GetOrderRequest {
+                        account_id: account.clone(),
+                        order_id: order_id.clone(),
+                    };
+                    async move { api.orders().get_order(req).await }
+                })
+                .await?;
+            let mut core = self.inner.core.lock().expect("core poisoned");
+            Ok(core.ingest_order(&os, brokapi_runtime::now()))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Orders of the account that are still working (`GetOrders`, filtered). Stop orders are not in
@@ -1141,14 +1212,19 @@ impl OrderExecutor for UserDataConnector {
     ///
     /// [`Error::RateLimited`], [`Error::Rejected`] or [`Error::Transport`], as for any read.
     async fn active_orders(&self) -> Result<Vec<OrderSnapshot>, Error> {
-        // Stop orders have their own list (`active_stop_orders`).
-        Ok(self
-            .fetch_orders()
-            .await?
-            .into_iter()
-            .filter(|(os, _)| is_active(os.status) && !map_stop::is_stop(os))
-            .map(|(_, snap)| snap)
-            .collect())
+        let span = self.inner.span.clone();
+        async move {
+            // Stop orders have their own list (`active_stop_orders`).
+            Ok(self
+                .fetch_orders()
+                .await?
+                .into_iter()
+                .filter(|(os, _)| is_active(os.status) && !map_stop::is_stop(os))
+                .map(|(_, snap)| snap)
+                .collect())
+        }
+        .instrument(span)
+        .await
     }
 
     /// Opens a `SubscribeOrders` stream for the account. Envelopes carry `Event::Order`.
@@ -1157,24 +1233,29 @@ impl OrderExecutor for UserDataConnector {
     /// degraded and refuses commands until `reconcile`. Errors as in `subscribe_*` of the market data
     /// connector: [`Error::Rejected`] for a refusal or for too many streams (code `subscription_quota`).
     async fn subscribe_order_state(&self) -> Result<SubscriptionId, Error> {
-        let account = self.account();
-        let opts = self.lossless();
-        self.register_sub(UdSubKind::Orders, opts, "SubscribeOrders", |sub| {
-            let api = self.inner.rpc.api.clone();
-            let open: OpenFn<po::SubscribeOrdersResponse> = Arc::new(move || {
-                let api = api.clone();
-                let req = po::SubscribeOrdersRequest {
-                    account_id: account.clone(),
-                };
-                Box::pin(async move {
-                    api.orders()
-                        .subscribe_orders(req)
-                        .await
-                        .map(|r| r.into_inner())
-                })
-            });
-            (open, Self::wrap(sub, UdEvent::Orders))
-        })
+        let span = self.inner.span.clone();
+        async move {
+            let account = self.account();
+            let opts = self.lossless();
+            self.register_sub(UdSubKind::Orders, opts, "SubscribeOrders", |sub| {
+                let api = self.inner.rpc.api.clone();
+                let open: OpenFn<po::SubscribeOrdersResponse> = Arc::new(move || {
+                    let api = api.clone();
+                    let req = po::SubscribeOrdersRequest {
+                        account_id: account.clone(),
+                    };
+                    Box::pin(async move {
+                        api.orders()
+                            .subscribe_orders(req)
+                            .await
+                            .map(|r| r.into_inner())
+                    })
+                });
+                (open, Self::wrap(sub, UdEvent::Orders))
+            })
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -1195,48 +1276,57 @@ impl OrderExecutor for UserDataConnector {
     /// [`Error::RateLimited`], [`Error::Rejected`] or [`Error::Transport`] from the order list
     /// request. On error the gate stays as it was.
     async fn reconcile(&self, ledger: &[ClientOrderId]) -> Result<ReconcileReport, Error> {
-        for cid in ledger {
-            self.inner.index.know(*cid);
-        }
-        // Reconcile is about plain orders: stop orders are restored with `active_stop_orders`, and
-        // their cids do not belong in this ledger.
-        let all: Vec<_> = self
-            .fetch_orders()
-            .await?
-            .into_iter()
-            .filter(|(os, _)| !map_stop::is_stop(os))
-            .collect();
-        let wanted: std::collections::HashSet<_> = ledger.iter().copied().collect();
-        let ledger_snaps: Vec<OrderSnapshot> = all
-            .iter()
-            .filter(|(_, s)| wanted.contains(&s.cid))
-            .map(|(_, s)| s.clone())
-            .collect();
-        let active: Vec<OrderSnapshot> = all
-            .iter()
-            .filter(|(os, _)| is_active(os.status))
-            .map(|(_, s)| s.clone())
-            .collect();
-        let mut report = reconcile_ledger(&ledger_snaps, &active);
-        // Cids the broker does not list at all.
-        let listed: std::collections::HashSet<_> = all.iter().map(|(_, s)| s.cid).collect();
-        report
-            .closed_offline
-            .extend(ledger.iter().filter(|c| !listed.contains(c)).copied());
-        report.closed_offline.sort();
-        report.closed_offline.dedup();
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Reconcile,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            for cid in ledger {
+                self.inner.index.know(*cid);
+            }
+            // Reconcile is about plain orders: stop orders are restored with `active_stop_orders`, and
+            // their cids do not belong in this ledger.
+            let all: Vec<_> = self
+                .fetch_orders()
+                .await?
+                .into_iter()
+                .filter(|(os, _)| !map_stop::is_stop(os))
+                .collect();
+            let wanted: std::collections::HashSet<_> = ledger.iter().copied().collect();
+            let ledger_snaps: Vec<OrderSnapshot> = all
+                .iter()
+                .filter(|(_, s)| wanted.contains(&s.cid))
+                .map(|(_, s)| s.clone())
+                .collect();
+            let active: Vec<OrderSnapshot> = all
+                .iter()
+                .filter(|(os, _)| is_active(os.status))
+                .map(|(_, s)| s.clone())
+                .collect();
+            let mut report = reconcile_ledger(&ledger_snaps, &active);
+            // Cids the broker does not list at all.
+            let listed: std::collections::HashSet<_> = all.iter().map(|(_, s)| s.cid).collect();
+            report
+                .closed_offline
+                .extend(ledger.iter().filter(|c| !listed.contains(c)).copied());
+            report.closed_offline.sort();
+            report.closed_offline.dedup();
 
-        {
-            let mut shutdown = self.inner.shutdown.lock().expect("shutdown poisoned");
-            shutdown.gate_mut().mark_reconciled();
-            shutdown.gate_mut().clear_degraded();
-        }
-        self.inner
-            .backpressure
-            .lock()
-            .expect("backpressure poisoned")
-            .clear_degraded();
-        Ok(report)
+            {
+                let mut shutdown = self.inner.shutdown.lock().expect("shutdown poisoned");
+                shutdown.gate_mut().mark_reconciled();
+                shutdown.gate_mut().clear_degraded();
+            }
+            self.inner
+                .backpressure
+                .lock()
+                .expect("backpressure poisoned")
+                .clear_degraded();
+            Ok(report)
+        })
+        .await
     }
 }
 
@@ -1288,89 +1378,99 @@ impl ExecutionSource for UserDataConnector {
     /// [`Error::RateLimited`], [`Error::Rejected`] (including `range_too_long`) or [`Error::Transport`],
     /// as for any read.
     async fn executions(&self, range: TimeRange) -> Result<Vec<Execution>, Error> {
-        let account = self.account();
-        let limit = self.inner.executions_limit.max(1);
-        let (mut from, mut to) = (range.from, range.to);
-        let mut seen = std::collections::HashSet::new();
-        let mut trades = Vec::new();
-        for _ in 0..MAX_TRADE_PAGES {
-            let resp = self
-                .inner
-                .rpc
-                .read("Trades", |api| {
-                    let req = pa::TradesRequest {
-                        account_id: account.clone(),
-                        limit,
-                        interval: Some(Interval {
-                            start_time: Some(to_timestamp(from)),
-                            end_time: Some(to_timestamp(to)),
-                        }),
-                    };
-                    async move { api.accounts().trades(req).await }
-                })
-                .await?;
-            let full = resp.trades.len() >= limit as usize;
-            let times: Vec<i64> = resp
-                .trades
-                .iter()
-                .filter_map(|t| t.timestamp.as_ref())
-                .map(|t| {
-                    t.seconds
-                        .saturating_mul(1_000_000_000)
-                        .saturating_add(i64::from(t.nanos))
-                })
-                .collect();
-            let mut fresh = 0usize;
-            for t in resp.trades {
-                if seen.insert(t.trade_id.clone()) {
-                    fresh += 1;
-                    trades.push(t);
+        let span = self.inner.span.clone();
+        async move {
+            let account = self.account();
+            let limit = self.inner.executions_limit.max(1);
+            let (mut from, mut to) = (range.from, range.to);
+            let mut seen = std::collections::HashSet::new();
+            let mut trades = Vec::new();
+            for _ in 0..MAX_TRADE_PAGES {
+                let resp = self
+                    .inner
+                    .rpc
+                    .read("Trades", |api| {
+                        let req = pa::TradesRequest {
+                            account_id: account.clone(),
+                            limit,
+                            interval: Some(Interval {
+                                start_time: Some(to_timestamp(from)),
+                                end_time: Some(to_timestamp(to)),
+                            }),
+                        };
+                        async move { api.accounts().trades(req).await }
+                    })
+                    .await?;
+                let full = resp.trades.len() >= limit as usize;
+                let times: Vec<i64> = resp
+                    .trades
+                    .iter()
+                    .filter_map(|t| t.timestamp.as_ref())
+                    .map(|t| {
+                        t.seconds
+                            .saturating_mul(1_000_000_000)
+                            .saturating_add(i64::from(t.nanos))
+                    })
+                    .collect();
+                let mut fresh = 0usize;
+                for t in resp.trades {
+                    if seen.insert(t.trade_id.clone()) {
+                        fresh += 1;
+                        trades.push(t);
+                    }
+                }
+                if !full {
+                    return Ok(self.map_trades(trades));
+                }
+                // A full answer: the period may hold more. Narrow it to what was not read yet.
+                let (Some(&first), Some(&last)) = (times.first(), times.last()) else {
+                    return Err(too_long(limit));
+                };
+                if fresh == 0 || times.len() < limit as usize {
+                    return Err(too_long(limit));
+                }
+                let (min, max) = (
+                    times.iter().copied().min().unwrap_or(first),
+                    times.iter().copied().max().unwrap_or(last),
+                );
+                if first <= last {
+                    from = brokapi_core::UnixNanos::from_nanos(max);
+                } else {
+                    to = brokapi_core::UnixNanos::from_nanos(min.saturating_add(1));
                 }
             }
-            if !full {
-                return Ok(self.map_trades(trades));
-            }
-            // A full answer: the period may hold more. Narrow it to what was not read yet.
-            let (Some(&first), Some(&last)) = (times.first(), times.last()) else {
-                return Err(too_long(limit));
-            };
-            if fresh == 0 || times.len() < limit as usize {
-                return Err(too_long(limit));
-            }
-            let (min, max) = (
-                times.iter().copied().min().unwrap_or(first),
-                times.iter().copied().max().unwrap_or(last),
-            );
-            if first <= last {
-                from = brokapi_core::UnixNanos::from_nanos(max);
-            } else {
-                to = brokapi_core::UnixNanos::from_nanos(min.saturating_add(1));
-            }
+            Err(too_long(limit))
         }
-        Err(too_long(limit))
+        .instrument(span)
+        .await
     }
 
     /// Opens a `SubscribeTrades` stream for the account. Envelopes carry `Event::Execution`, with the cid
     /// when the order is ours. Lossless buffer, errors as in `subscribe_order_state`.
     async fn subscribe_executions(&self) -> Result<SubscriptionId, Error> {
-        let account = self.account();
-        let opts = self.lossless();
-        self.register_sub(UdSubKind::Executions, opts, "SubscribeTrades", |sub| {
-            let api = self.inner.rpc.api.clone();
-            let open: OpenFn<po::SubscribeTradesResponse> = Arc::new(move || {
-                let api = api.clone();
-                let req = po::SubscribeTradesRequest {
-                    account_id: account.clone(),
-                };
-                Box::pin(async move {
-                    api.orders()
-                        .subscribe_trades(req)
-                        .await
-                        .map(|r| r.into_inner())
-                })
-            });
-            (open, Self::wrap(sub, UdEvent::Trades))
-        })
+        let span = self.inner.span.clone();
+        async move {
+            let account = self.account();
+            let opts = self.lossless();
+            self.register_sub(UdSubKind::Executions, opts, "SubscribeTrades", |sub| {
+                let api = self.inner.rpc.api.clone();
+                let open: OpenFn<po::SubscribeTradesResponse> = Arc::new(move || {
+                    let api = api.clone();
+                    let req = po::SubscribeTradesRequest {
+                        account_id: account.clone(),
+                    };
+                    Box::pin(async move {
+                        api.orders()
+                            .subscribe_trades(req)
+                            .await
+                            .map(|r| r.into_inner())
+                    })
+                });
+                (open, Self::wrap(sub, UdEvent::Trades))
+            })
+            .await
+        }
+        .instrument(span)
         .await
     }
 }
@@ -1395,28 +1495,39 @@ impl PortfolioSource for UserDataConnector {
     ///
     /// [`Error::Rejected`] (unknown account), [`Error::RateLimited`], [`Error::Transport`].
     async fn portfolio(&self) -> Result<Portfolio, Error> {
-        let account = self.account();
-        let resp = self
-            .inner
-            .rpc
-            .read("GetAccount", |api| {
-                let req = pa::GetAccountRequest {
-                    account_id: account.clone(),
-                };
-                async move { api.accounts().get_account(req).await }
-            })
-            .await?;
-        Ok(map_account(&resp, brokapi_runtime::now()))
+        let span = self.inner.span.clone();
+        async move {
+            let account = self.account();
+            let resp = self
+                .inner
+                .rpc
+                .read("GetAccount", |api| {
+                    let req = pa::GetAccountRequest {
+                        account_id: account.clone(),
+                    };
+                    async move { api.accounts().get_account(req).await }
+                })
+                .await?;
+            Ok(map_account(&resp, brokapi_runtime::now()))
+        }
+        .instrument(span)
+        .await
     }
 
     /// The positions of [`portfolio`](PortfolioSource::portfolio). One `GetAccount` request.
     async fn positions(&self) -> Result<Vec<Position>, Error> {
-        Ok(self.portfolio().await?.positions)
+        let span = self.inner.span.clone();
+        async move { Ok(self.portfolio().await?.positions) }
+            .instrument(span)
+            .await
     }
 
     /// The balances of [`portfolio`](PortfolioSource::portfolio). One `GetAccount` request.
     async fn balances(&self) -> Result<Vec<Balance>, Error> {
-        Ok(self.portfolio().await?.balances)
+        let span = self.inner.span.clone();
+        async move { Ok(self.portfolio().await?.balances) }
+            .instrument(span)
+            .await
     }
 
     /// Streams `SubscribeAccount`: every message is a full account state (`Event::Portfolio`).
@@ -1424,23 +1535,28 @@ impl PortfolioSource for UserDataConnector {
     /// Each event replaces the previous one. `opts` is your choice of buffer policy: `Conflate` keeps
     /// only the latest state, which is what you usually want here.
     async fn subscribe_portfolio(&self, opts: SubscribeOpts) -> Result<SubscriptionId, Error> {
-        let account = self.account();
-        self.register_sub(UdSubKind::Portfolio, opts, "SubscribeAccount", |sub| {
-            let api = self.inner.rpc.api.clone();
-            let open: OpenFn<pa::GetAccountResponse> = Arc::new(move || {
-                let api = api.clone();
-                let req = pa::GetAccountRequest {
-                    account_id: account.clone(),
-                };
-                Box::pin(async move {
-                    api.accounts()
-                        .subscribe_account(req)
-                        .await
-                        .map(|r| r.into_inner())
-                })
-            });
-            (open, Self::wrap(sub, UdEvent::Account))
-        })
+        let span = self.inner.span.clone();
+        async move {
+            let account = self.account();
+            self.register_sub(UdSubKind::Portfolio, opts, "SubscribeAccount", |sub| {
+                let api = self.inner.rpc.api.clone();
+                let open: OpenFn<pa::GetAccountResponse> = Arc::new(move || {
+                    let api = api.clone();
+                    let req = pa::GetAccountRequest {
+                        account_id: account.clone(),
+                    };
+                    Box::pin(async move {
+                        api.accounts()
+                            .subscribe_account(req)
+                            .await
+                            .map(|r| r.into_inner())
+                    })
+                });
+                (open, Self::wrap(sub, UdEvent::Account))
+            })
+            .await
+        }
+        .instrument(span)
         .await
     }
 }
@@ -1470,94 +1586,103 @@ impl StopOrderExecutor for UserDataConnector {
     ///
     /// See the [type docs](UserDataConnector) for an example.
     async fn place_stop(&self, req: PlaceStopOrderRequest) -> Result<OrderAck, Error> {
-        self.check_command()?;
-        let wire = map_stop::build(&self.inner.account_id, &req)?;
-        self.inner
-            .price_grid
-            .check_qty(&req.instrument.key, req.qty)?;
-        self.inner
-            .price_grid
-            .check(&req.instrument.key, req.stop_price)?;
-        if let Some(p) = req.limit_price {
-            self.inner.price_grid.check(&req.instrument.key, p)?;
-        }
-        self.inner.rpc.acquire(match &wire {
-            StopWire::Order(_) => "PlaceOrder",
-            StopWire::TakeProfit(_) => "PlaceSLTPOrder",
-        })?;
-        let _instrument = self.inner.locks.lock(&req.instrument).await;
-        // The gate may have closed while this command stood in the queue.
-        self.check_command()?;
-        self.inner.locks.bind(req.cid, &req.instrument);
-        if !self
-            .inner
-            .stops_sent
-            .lock()
-            .expect("stops poisoned")
-            .insert(req.cid)
-        {
-            return Err(Error::Rejected {
-                code: "duplicate_place".into(),
-                message: "auto-retry of place_stop is forbidden".into(),
-            });
-        }
-        self.inner.index.know(req.cid);
-        let sent = match wire {
-            StopWire::Order(body) => {
-                self.inner
-                    .rpc
-                    .send_command(|api| {
-                        let body = body.clone();
-                        async move { api.orders().place_order(body).await }
-                    })
-                    .await
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::PlaceStop,
+            Some(req.cid),
+            Some(&req.instrument.key),
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.check_command()?;
+            let wire = map_stop::build(&self.inner.account_id, &req)?;
+            self.inner
+                .price_grid
+                .check_qty(&req.instrument.key, req.qty)?;
+            self.inner
+                .price_grid
+                .check(&req.instrument.key, req.stop_price)?;
+            if let Some(p) = req.limit_price {
+                self.inner.price_grid.check(&req.instrument.key, p)?;
             }
-            StopWire::TakeProfit(body) => {
-                self.inner
-                    .rpc
-                    .send_command(|api| {
-                        let body = body.clone();
-                        async move { api.orders().place_sltp_order(body).await }
-                    })
-                    .await
+            self.inner.rpc.acquire(match &wire {
+                StopWire::Order(_) => "PlaceOrder",
+                StopWire::TakeProfit(_) => "PlaceSLTPOrder",
+            })?;
+            let _instrument = self.inner.locks.lock(&req.instrument).await;
+            // The gate may have closed while this command stood in the queue.
+            self.check_command()?;
+            self.inner.locks.bind(req.cid, &req.instrument);
+            if !self
+                .inner
+                .stops_sent
+                .lock()
+                .expect("stops poisoned")
+                .insert(req.cid)
+            {
+                return Err(Error::Rejected {
+                    code: "duplicate_place".into(),
+                    message: "auto-retry of place_stop is forbidden".into(),
+                });
             }
-        };
-        match sent {
-            Ok(os) => {
-                if let Some(rej) = rejection_of(&os) {
+            self.inner.index.know(req.cid);
+            let sent = match wire {
+                StopWire::Order(body) => {
                     self.inner
-                        .stops_sent
-                        .lock()
-                        .expect("stops poisoned")
-                        .remove(&req.cid);
-                    return Err(rej);
+                        .rpc
+                        .send_command(|api| {
+                            let body = body.clone();
+                            async move { api.orders().place_order(body).await }
+                        })
+                        .await
                 }
-                if os.order_id.is_empty() {
-                    return Err(Error::Unknown);
-                }
-                self.inner.index.bind(req.cid, &os.order_id);
-                Ok(OrderAck {
-                    cid: req.cid,
-                    broker_id: brokapi_core::BrokerOrderId::new(os.order_id.clone()),
-                    ts: timestamps(
-                        os.accept_at.as_ref().or(os.transact_at.as_ref()),
-                        brokapi_runtime::now(),
-                    ),
-                })
-            }
-            Err(e) => {
-                let err = map_command_err(&e);
-                if !matches!(err, Error::Unknown) {
-                    // A definite refusal: the broker holds nothing, the cid is clean again.
+                StopWire::TakeProfit(body) => {
                     self.inner
-                        .stops_sent
-                        .lock()
-                        .expect("stops poisoned")
-                        .remove(&req.cid);
+                        .rpc
+                        .send_command(|api| {
+                            let body = body.clone();
+                            async move { api.orders().place_sltp_order(body).await }
+                        })
+                        .await
                 }
-                Err(err)
+            };
+            match sent {
+                Ok(os) => {
+                    if let Some(rej) = rejection_of(&os) {
+                        self.inner
+                            .stops_sent
+                            .lock()
+                            .expect("stops poisoned")
+                            .remove(&req.cid);
+                        return Err(rej);
+                    }
+                    if os.order_id.is_empty() {
+                        return Err(Error::Unknown);
+                    }
+                    self.inner.index.bind(req.cid, &os.order_id);
+                    Ok(OrderAck {
+                        cid: req.cid,
+                        broker_id: brokapi_core::BrokerOrderId::new(os.order_id.clone()),
+                        ts: timestamps(
+                            os.accept_at.as_ref().or(os.transact_at.as_ref()),
+                            brokapi_runtime::now(),
+                        ),
+                    })
+                }
+                Err(e) => {
+                    let err = map_command_err(&e);
+                    if !matches!(err, Error::Unknown) {
+                        // A definite refusal: the broker holds nothing, the cid is clean again.
+                        self.inner
+                            .stops_sent
+                            .lock()
+                            .expect("stops poisoned")
+                            .remove(&req.cid);
+                    }
+                    Err(err)
+                }
             }
-        }
+        })
+        .await
     }
 
     /// `CancelOrder` with the stop order's id. That Finam cancels stop orders through the same call
@@ -1571,28 +1696,40 @@ impl StopOrderExecutor for UserDataConnector {
     /// As for `cancel`: [`Error::NotReconciled`] and its siblings, [`Error::RateLimited`],
     /// [`Error::Rejected`] (including code `not_found`), [`Error::Unknown`].
     async fn cancel_stop(&self, stop: StopOrderRef) -> Result<(), Error> {
-        self.check_command()?;
-        self.inner.rpc.acquire("CancelOrder")?;
-        let order_id = match stop {
-            StopOrderRef::Broker(id) => id.as_str().to_string(),
-            StopOrderRef::Cid(cid) => self.order_id_of(cid).await?,
-        };
-        let account = self.account();
-        let sent = self
-            .inner
-            .rpc
-            .send_command(|api| {
-                let req = po::CancelOrderRequest {
-                    account_id: account.clone(),
-                    order_id: order_id.clone(),
-                };
-                async move { api.orders().cancel_order(req).await }
-            })
-            .await;
-        match sent {
-            Ok(_) => Ok(()),
-            Err(e) => Err(map_command_err(&e)),
-        }
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::CancelStop,
+            match &stop {
+                StopOrderRef::Cid(c) => Some(*c),
+                _ => None,
+            },
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.check_command()?;
+            self.inner.rpc.acquire("CancelOrder")?;
+            let order_id = match stop {
+                StopOrderRef::Broker(id) => id.as_str().to_string(),
+                StopOrderRef::Cid(cid) => self.order_id_of(cid).await?,
+            };
+            let account = self.account();
+            let sent = self
+                .inner
+                .rpc
+                .send_command(|api| {
+                    let req = po::CancelOrderRequest {
+                        account_id: account.clone(),
+                        order_id: order_id.clone(),
+                    };
+                    async move { api.orders().cancel_order(req).await }
+                })
+                .await;
+            match sent {
+                Ok(_) => Ok(()),
+                Err(e) => Err(map_command_err(&e)),
+            }
+        })
+        .await
     }
 
     /// Stop orders that are waiting for their trigger (`GetOrders`, filtered to stop orders in the
@@ -1605,33 +1742,38 @@ impl StopOrderExecutor for UserDataConnector {
     ///
     /// [`Error::RateLimited`], [`Error::Rejected`] or [`Error::Transport`], as for any read.
     async fn active_stop_orders(&self) -> Result<Vec<StopOrderSnapshot>, Error> {
-        let account = self.account();
-        let resp = self
-            .inner
-            .rpc
-            .read("GetOrders", |api| {
-                let req = po::OrdersRequest {
-                    account_id: account.clone(),
-                };
-                async move { api.orders().get_orders(req).await }
-            })
-            .await?;
-        let now = brokapi_runtime::now();
-        let mut out = Vec::new();
-        for os in resp.orders.iter().filter(|os| map_stop::is_stop(os)) {
-            // Keep the id <-> cid index current, then show the cid only when it is really ours.
-            let (client_order_id, comment) = map_stop::echo_keys(os);
-            let cid = self
+        let span = self.inner.span.clone();
+        async move {
+            let account = self.account();
+            let resp = self
                 .inner
-                .index
-                .resolve(&os.order_id, &client_order_id, &comment);
-            let ours = (cid != crate::index::foreign_cid(&os.order_id)).then_some(cid);
-            let snap = map_stop::snapshot(os, ours, now);
-            if snap.state == StopOrderState::Active {
-                out.push(snap);
+                .rpc
+                .read("GetOrders", |api| {
+                    let req = po::OrdersRequest {
+                        account_id: account.clone(),
+                    };
+                    async move { api.orders().get_orders(req).await }
+                })
+                .await?;
+            let now = brokapi_runtime::now();
+            let mut out = Vec::new();
+            for os in resp.orders.iter().filter(|os| map_stop::is_stop(os)) {
+                // Keep the id <-> cid index current, then show the cid only when it is really ours.
+                let (client_order_id, comment) = map_stop::echo_keys(os);
+                let cid = self
+                    .inner
+                    .index
+                    .resolve(&os.order_id, &client_order_id, &comment);
+                let ours = (cid != crate::index::foreign_cid(&os.order_id)).then_some(cid);
+                let snap = map_stop::snapshot(os, ours, now);
+                if snap.state == StopOrderState::Active {
+                    out.push(snap);
+                }
             }
+            Ok(out)
         }
-        Ok(out)
+        .instrument(span)
+        .await
     }
 
     /// No separate stream: `SubscribeOrders` delivers orders, and whether stop orders are among them
@@ -1641,6 +1783,9 @@ impl StopOrderExecutor for UserDataConnector {
     ///
     /// Always [`Error::Unsupported`] (capability `stop_order_stream`).
     async fn subscribe_stop_orders(&self) -> Result<SubscriptionId, Error> {
-        Err(unsupported("stop_order_stream"))
+        let span = self.inner.span.clone();
+        async move { Err(unsupported("stop_order_stream")) }
+            .instrument(span)
+            .await
     }
 }

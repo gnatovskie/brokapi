@@ -381,7 +381,7 @@ async fn fetch(api: &dyn TokenApi, secret: &str, source_app_id: &str) -> Result<
         Ok(info) => info,
         Err(e) => {
             // The token itself is good; only the lifetime/account list is missing.
-            warn!(error = %e, "TokenDetails failed, falling back to JWT claims");
+            warn!(error = %e, "token details not read, the lifetime is taken from the token");
             TokenInfo::default()
         }
     };
@@ -392,7 +392,7 @@ async fn fetch(api: &dyn TokenApi, secret: &str, source_app_id: &str) -> Result<
         (a, b) => a.or(b),
     };
     let ttl = info.ttl.unwrap_or(ASSUMED_TTL);
-    debug!(?ttl, "finam token issued");
+    debug!(ttl_s = ttl.as_secs(), "token issued");
     Ok(State {
         token: Arc::from(token),
         info,
@@ -433,7 +433,7 @@ async fn refresh_loop(weak: Weak<TokenManager>) {
         match m.refresh().await {
             Ok(()) => backoff = RETRY_MIN,
             Err(e) => {
-                warn!(error = %e, retry_in = ?backoff, "finam token refresh failed");
+                warn!(error = %e, retry_in_ms = backoff.as_millis() as u64, "token renewal failed, retrying");
                 drop(m);
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(RETRY_MAX);

@@ -31,8 +31,10 @@
 //! ```
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
+use tonic::codegen::{BoxFuture, Service, http};
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -221,7 +223,59 @@ impl Interceptor for AuthInterceptor {
 }
 
 /// Channel with the [`AuthInterceptor`] on it: the transport type of every client of [`FinamApi`].
-pub type Authorized = InterceptedService<Channel, AuthInterceptor>;
+pub type Authorized = InterceptedService<Logged, AuthInterceptor>;
+
+/// The channel with a line on `debug` for every call: the method (`OrdersService/PostOrder`), the HTTP status, the
+/// gRPC status when the answer carries it in its headers (a refusal does), and the time to the answer. For a stream
+/// the time is to its opening. Neither the token nor the messages are written.
+#[derive(Debug, Clone)]
+pub struct Logged {
+    channel: Channel,
+}
+
+impl Service<http::Request<tonic::body::Body>> for Logged {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = tonic::transport::Error;
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.channel.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+        let method = short_method(req.uri().path());
+        let answer = self.channel.call(req);
+        Box::pin(async move {
+            let started = Instant::now();
+            let result = answer.await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            match &result {
+                Ok(resp) => {
+                    let grpc_status = resp
+                        .headers()
+                        .get("grpc-status")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("0")
+                        .to_owned();
+                    tracing::debug!(%method, status = resp.status().as_u16(), %grpc_status, latency_ms, "request done")
+                }
+                Err(e) => tracing::debug!(%method, latency_ms, error = %e, "request failed"),
+            }
+            result
+        })
+    }
+}
+
+/// `/tinkoff.public.invest.api.contract.v1.OrdersService/PostOrder` as `OrdersService/PostOrder`.
+fn short_method(path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    match path.split_once('/') {
+        Some((service, method)) => {
+            format!("{}/{method}", service.rsplit('.').next().unwrap_or(service))
+        }
+        None => path.to_owned(),
+    }
+}
 
 /// One channel plus a shared token manager. Hands out service clients that attach the JWT to each call.
 ///
@@ -301,7 +355,9 @@ impl FinamApi {
 
     fn svc(&self) -> Authorized {
         InterceptedService::new(
-            self.channel.clone(),
+            Logged {
+                channel: self.channel.clone(),
+            },
             AuthInterceptor {
                 tokens: Arc::clone(&self.tokens),
                 bearer: self.bearer,
@@ -398,5 +454,20 @@ mod tests {
             assert!(value.is_sensitive());
             assert!(!format!("{req:?}").contains("the-jwt"), "{req:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::short_method;
+
+    #[test]
+    fn the_method_is_shown_without_its_package() {
+        assert_eq!(
+            short_method("/grpc.tradeapi.v1.orders.OrdersService/PlaceOrder"),
+            "OrdersService/PlaceOrder"
+        );
+        assert_eq!(short_method("/Plain/Call"), "Plain/Call");
+        assert_eq!(short_method("odd"), "odd");
     }
 }

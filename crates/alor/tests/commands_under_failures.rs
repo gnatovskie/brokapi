@@ -340,3 +340,26 @@ async fn quantities_in_pieces_become_lots_and_come_back_as_pieces() {
     }
     assert_eq!(commands(), before, "nothing was sent for a broken quantity");
 }
+
+/// By the docs of the broker a stop order that triggered has the status `filled` and leaves the list of the waiting
+/// ones. What order the broker makes of it, and under which cid, is not documented and not seen live: the mock only
+/// gives the documented part. The stop leaves `active_stop_orders` and the list still reads without an error.
+#[tokio::test]
+async fn a_stop_order_that_triggered_leaves_the_list_of_waiting_ones() {
+    let (_opts, server, ud, _rx) = start().await;
+    let waiting = stop(StopOrderKind::StopLoss);
+    let kept = stop(StopOrderKind::StopLimit);
+    let cid = waiting.cid;
+    ud.place_stop(waiting).await.unwrap();
+    ud.place_stop(kept.clone()).await.unwrap();
+    assert_eq!(ud.active_stop_orders().await.unwrap().len(), 2);
+
+    server.fill(
+        &cid.hyphenated().to_string(),
+        Qty::from(10),
+        Price::new(dec!(90)),
+    );
+    let left = ud.active_stop_orders().await.unwrap();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].cid, Some(kept.cid));
+}

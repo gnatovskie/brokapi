@@ -3,8 +3,9 @@
 //! The generic methods are here ([`AlorHttpClient::read`], [`AlorHttpClient::command`]). The endpoint methods
 //! (`get_order_book`, `create_limit_order`, ...) are in [`super::endpoints`].
 
+use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 pub use reqwest::Method;
@@ -160,12 +161,12 @@ impl AlorHttpClient {
     pub async fn refresh_access_token(&self) -> Result<String, AlorApiError> {
         let _guard = self.shared.refresh_mutex.lock().await;
         let url = format!("{}/refresh", self.auth_base_url);
-        debug!("Refreshing the access token...");
+        debug!("access token renewal started");
         let resp = self
             .client
             .post(&url)
             .json(&serde_json::json!({ "token": self.shared.refresh_token }))
-            .send()
+            .send_logged()
             .await?;
         let status = resp.status();
         let body = resp.text().await?;
@@ -258,7 +259,10 @@ impl AlorHttpClient {
             .send(Method::GET, &url, query, None::<&()>, &[], &token)
             .await?;
         if resp.status() == StatusCode::UNAUTHORIZED {
-            warn!("Got 401, refreshing the token and repeating the read once...");
+            warn!(
+                status = 401,
+                "token refused, renewing it and repeating the read"
+            );
             let new_token = self.refresh_access_token().await?;
             let resp = self
                 .send(Method::GET, &url, query, None::<&()>, &[], &new_token)
@@ -299,7 +303,10 @@ impl AlorHttpClient {
             .send(method, &url, query, body, &headers, &token)
             .await?;
         if resp.status() == StatusCode::UNAUTHORIZED {
-            warn!("Got 401 on a command: renewing the token, the command is not repeated");
+            warn!(
+                status = 401,
+                "token refused on a command, renewing it: the command is not repeated"
+            );
             // The next call needs a fresh token. A failure of the renewal does not hide the 401.
             let _ = self.refresh_access_token().await;
         }
@@ -354,7 +361,7 @@ impl AlorHttpClient {
         if let Some(b) = body {
             req = req.json(b);
         }
-        Ok(req.send().await?)
+        Ok(req.send_logged().await?)
     }
 
     /// Turns a reply into `T` or into the matching [`AlorApiError`].
@@ -463,6 +470,49 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// The path of a request as the log shows it: the portfolio or the login after `Clients` as a mask,
+/// `/md/v2/Clients/MOEX/D00001/orders` as `/md/v2/Clients/MOEX/****0001/orders`.
+fn masked_path(path: &str) -> String {
+    let mut parts: Vec<String> = path.split('/').map(str::to_owned).collect();
+    if let Some(at) = parts.iter().position(|p| p.eq_ignore_ascii_case("clients")) {
+        let exchange = parts
+            .get(at + 1)
+            .is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_uppercase()))
+            && parts.len() > at + 3;
+        let account = if exchange { at + 2 } else { at + 1 };
+        if let Some(part) = parts.get_mut(account) {
+            *part = brokapi_redact::mask_account(part);
+        }
+    }
+    parts.join("/")
+}
+
+/// Sends a request and writes it to the log on `debug`: the method and the path (never the query or the body: a read of
+/// orders holds account data), the HTTP status and the time.
+trait SendLogged {
+    fn send_logged(self) -> impl Future<Output = reqwest::Result<reqwest::Response>> + Send;
+}
+
+impl SendLogged for reqwest::RequestBuilder {
+    fn send_logged(self) -> impl Future<Output = reqwest::Result<reqwest::Response>> + Send {
+        let (client, request) = self.build_split();
+        async move {
+            let request = request?;
+            let method = format!("{} {}", request.method(), masked_path(request.url().path()));
+            let started = Instant::now();
+            let result = client.execute(request).await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            match &result {
+                Ok(resp) => {
+                    debug!(%method, status = resp.status().as_u16(), latency_ms, "request done")
+                }
+                Err(e) => debug!(%method, latency_ms, error = %e, "request failed"),
+            }
+            result
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,5 +554,26 @@ mod tests {
         let s = "ж".repeat(150);
         let cut = truncate_utf8(&s, 199);
         assert_eq!(cut.len(), 198);
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::masked_path;
+
+    #[test]
+    fn the_portfolio_and_the_login_in_a_path_are_masked() {
+        assert_eq!(
+            masked_path("/md/v2/Clients/MOEX/D00001/orders"),
+            "/md/v2/Clients/MOEX/****0001/orders"
+        );
+        assert_eq!(
+            masked_path("/md/v2/Clients/P012345/positions"),
+            "/md/v2/Clients/****2345/positions"
+        );
+        assert_eq!(
+            masked_path("/md/v2/Securities/MOEX/SBER"),
+            "/md/v2/Securities/MOEX/SBER"
+        );
     }
 }

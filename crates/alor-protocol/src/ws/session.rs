@@ -13,7 +13,8 @@ use tokio::sync::Mutex;
 use tokio::time::{self, sleep};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, error, info, warn};
+use tracing::Instrument as _;
+use tracing::{debug, info, trace, warn};
 
 use crate::error::AlorApiError;
 use crate::http::client::AlorHttpClient;
@@ -123,10 +124,7 @@ impl WsSession {
                 .await
                 .map_err(|e| *e)
                 .map(|(stream, response)| {
-                    info!(
-                        "WebSocket connected to {url} with status <{}>",
-                        response.status()
-                    );
+                    info!(%url, status = response.status().as_u16(), "stream connected");
                     stream
                 })
         })
@@ -149,15 +147,19 @@ impl WsSession {
         let subscriptions = Arc::new(Mutex::new(Vec::new()));
         let is_connected = Arc::new(AtomicBool::new(false));
         let dropped_events = Arc::new(AtomicU64::new(0));
-        let handle = tokio::spawn(run_loop(
-            (http, connect),
-            event_tx,
-            options,
-            Arc::clone(&subscriptions),
-            user_rx,
-            Arc::clone(&is_connected),
-            Arc::clone(&dropped_events),
-        ));
+        let handle = tokio::spawn(
+            run_loop(
+                (http, connect),
+                event_tx,
+                options,
+                Arc::clone(&subscriptions),
+                user_rx,
+                Arc::clone(&is_connected),
+                Arc::clone(&dropped_events),
+            )
+            // The session runs in the span of its connector: its lines show the broker and the role.
+            .in_current_span(),
+        );
         Self {
             user_tx,
             subscriptions,
@@ -251,7 +253,7 @@ async fn run_loop<S, C, F>(
         let ws_stream = match connect(url.clone()).await {
             Ok(s) => s,
             Err(e) => {
-                error!("WS connect failed: {e}");
+                warn!(error = %e, retry_in_ms = backoff.as_millis() as u64, "stream connect failed, retrying");
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(backoff_max);
                 continue;
@@ -272,7 +274,7 @@ async fn run_loop<S, C, F>(
                 let token = match http.get_access_token().await {
                     Ok(t) => t,
                     Err(e) => {
-                        error!("WS: no access token: {e}");
+                        warn!(error = %e, "no access token for the stream, reconnecting");
                         break 'connection;
                     }
                 };
@@ -283,13 +285,13 @@ async fn run_loop<S, C, F>(
                         .await
                         .is_err()
                     {
-                        error!("WS: failed to restore a subscription");
+                        warn!("subscriptions not restored, reconnecting");
                         break 'connection;
                     }
                     restored.insert(*seq, ());
                 }
                 if !subs.is_empty() {
-                    info!("Restored {} subscriptions", subs.len());
+                    info!(count = subs.len(), "subscriptions restored");
                 }
             }
             is_connected.store(true, Ordering::Release);
@@ -301,18 +303,19 @@ async fn run_loop<S, C, F>(
                 tokio::select! {
                     frame = read.next() => match frame {
                         Some(Ok(Message::Text(text))) => {
+                            trace!(frame = %brokapi_redact::scrub_body(&text), "frame");
                             let incoming = parse_incoming(&text);
                             // The broker closes the connection after a 401 and the cached token is no good: get a
                             // new one now, the reconnect needs it.
                             if matches!(incoming, WsIncoming::Status { code: 401, .. }) {
-                                warn!("WS: the broker refused the token, renewing it");
+                                warn!(status = 401, "stream refused the token, renewing it");
                                 let _ = http.refresh_access_token().await;
                             }
                             match event_tx.try_send(incoming) {
                                 Ok(true) => {}
                                 Ok(false) => {
                                     dropped_events.fetch_add(1, Ordering::Relaxed);
-                                    warn!("WS: the receiving channel is full, a frame is dropped");
+                                    warn!("receiving channel full, frame dropped");
                                 }
                                 Err(_) => break 'session,
                             }
@@ -323,12 +326,12 @@ async fn run_loop<S, C, F>(
                             }
                         }
                         Some(Ok(Message::Close(_))) => {
-                            info!("WS closed by the server");
+                            debug!("stream closed by the broker");
                             break 'inner;
                         }
                         Some(Ok(_)) => {}
                         Some(Err(e)) => {
-                            error!("WS read error: {e}");
+                            warn!(error = %e, "stream read failed");
                             break 'inner;
                         }
                         None => break 'inner,
@@ -337,7 +340,7 @@ async fn run_loop<S, C, F>(
                         if write.send(Message::Ping(Vec::new().into())).await.is_err() {
                             break 'inner;
                         }
-                        debug!("WS ping sent");
+                        debug!("ping sent");
                     }
                     msg = user_rx.recv() => match msg {
                         Ok(Queued { seq, sub }) => {
@@ -348,12 +351,12 @@ async fn run_loop<S, C, F>(
                                 Ok(t) => t,
                                 Err(e) => {
                                     // The subscribe stays in the list, the reconnect sends it with a token.
-                                    error!("WS: no access token for a request: {e}");
+                                    warn!(error = %e, "no access token for a stream request, reconnecting");
                                     break 'inner;
                                 }
                             };
                             if write.send(Message::Text(sub.to_json(&token).into())).await.is_err() {
-                                error!("WS write error");
+                                warn!("stream write failed, reconnecting");
                                 break 'inner;
                             }
                         }
@@ -368,7 +371,10 @@ async fn run_loop<S, C, F>(
         if healthy {
             backoff = backoff_min;
         }
-        warn!("WS disconnected, reconnecting in {backoff:?}...");
+        warn!(
+            retry_in_ms = backoff.as_millis() as u64,
+            "stream lost, reconnecting"
+        );
         sleep(backoff).await;
         backoff = (backoff * 2).min(backoff_max);
     }

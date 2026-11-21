@@ -19,6 +19,7 @@ use brokapi_sansio::SubscriptionKind;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::config::MarketDataConfig;
 use crate::core::MdCore;
@@ -42,6 +43,8 @@ const KIND_PAGE_SIZE: u32 = 100;
 const MAX_KIND_PAGES: u32 = 200;
 
 struct MdShared {
+    /// `connector{broker, role, account}`: the tasks run in it, the commands take it as the parent.
+    span: tracing::Span,
     http: AlorHttpClient,
     ws: WsSession,
     limiter: Arc<BrokerLimiter>,
@@ -110,6 +113,16 @@ impl MarketDataConnector {
         limiter: Arc<BrokerLimiter>,
         out: mpsc::Sender<Envelope>,
     ) -> Result<Self, Error> {
+        let span =
+            brokapi_runtime::spans::connector("alor", brokapi_runtime::spans::Role::Md, None);
+        Self::start_in(cfg, limiter, out).instrument(span).await
+    }
+
+    async fn start_in(
+        cfg: MarketDataConfig,
+        limiter: Arc<BrokerLimiter>,
+        out: mpsc::Sender<Envelope>,
+    ) -> Result<Self, Error> {
         let http = AlorHttpClient::new(cfg.alor.clone()).map_err(map_config_err)?;
         http.get_access_token().await.map_err(map_err)?;
 
@@ -120,6 +133,7 @@ impl MarketDataConnector {
         let emitter = Emitter::new(Arc::clone(&cfg.source), out);
 
         let inner = Arc::new(MdShared {
+            span: tracing::Span::current(),
             http,
             ws,
             limiter,
@@ -130,13 +144,11 @@ impl MarketDataConnector {
             cancel: cancel.clone(),
             ack_timeout: cfg.subscribe_ack_timeout,
         });
-        let pump = tokio::spawn(run_pump(
-            core,
-            emitter,
-            event_rx,
-            cancel,
-            |m| async move { m },
-        ));
+        let pump = brokapi_runtime::spans::spawn_in(
+            &tracing::Span::current(),
+            run_pump(core, emitter, event_rx, cancel, |m| async move { m }),
+        );
+        brokapi_runtime::spans::started();
         Ok(Self { inner, pump })
     }
 
@@ -153,6 +165,17 @@ impl MarketDataConnector {
     /// Stops the connector. Unless the mode is `Immediate`, it cancels the subscriptions at the broker first;
     /// `Graceful` also lets the bot's channel take what is still buffered.
     pub async fn shutdown(self, mode: ShutdownMode) -> ShutdownReport {
+        let span = self.inner.span.clone();
+        async move {
+            let report = self.shutdown_in(mode).await;
+            brokapi_runtime::spans::stopped(&report);
+            report
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn shutdown_in(self, mode: ShutdownMode) -> ShutdownReport {
         let mut unsubscribed = 0usize;
         let mut unsubscribe_failed = 0usize;
         if !matches!(mode, ShutdownMode::Immediate) {
@@ -185,49 +208,58 @@ impl MarketDataConnector {
         guid: String,
         ws: WsSubscribe,
     ) -> Result<SubscriptionId, Error> {
-        let id = self.inner.sub_ids.next();
-        self.inner
-            .emitter
-            .register(id, Some(instrument.clone()), opts.backpressure);
-        // The core attributes incoming data to this subscription. It is told before the request goes out, so the
-        // confirmation cannot overtake it.
-        self.inner.core.lock().await.register(&guid, id, core_kind);
-        let notify = self.inner.core.lock().await.notifier();
-        if let Err(e) = self.inner.ws.subscribe(ws).await {
-            self.inner.core.lock().await.forget(&guid);
-            self.inner.emitter.unregister(id);
-            return Err(map_err(e));
-        }
-        // Returns when the broker has confirmed the subscription: what happens after that is delivered.
-        let confirmed = wait_ack(
-            &self.inner.core,
-            notify,
-            self.inner.ack_timeout,
-            |c: &MdCore| {
-                (
-                    c.actual_state(id).unwrap_or(crate::core::SubState::Pending),
-                    c.failure(id).map(str::to_string),
-                )
-            },
-        )
-        .await;
-        if let Err(e) = confirmed {
-            let _ = self.inner.ws.unsubscribe(&guid).await;
-            self.inner.core.lock().await.forget(&guid);
-            self.inner.emitter.unregister(id);
-            return Err(e);
-        }
-        self.inner.subs.write().await.insert(
-            id,
-            MdSubscription {
-                id,
-                instrument,
-                kind,
-                opts,
-                guid,
-            },
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            Some(&instrument.key),
         );
-        Ok(id)
+        brokapi_runtime::spans::command(span, async move {
+            let id = self.inner.sub_ids.next();
+            self.inner
+                .emitter
+                .register(id, Some(instrument.clone()), opts.backpressure);
+            // The core attributes incoming data to this subscription. It is told before the request goes out, so the
+            // confirmation cannot overtake it.
+            self.inner.core.lock().await.register(&guid, id, core_kind);
+            let notify = self.inner.core.lock().await.notifier();
+            if let Err(e) = self.inner.ws.subscribe(ws).await {
+                self.inner.core.lock().await.forget(&guid);
+                self.inner.emitter.unregister(id);
+                return Err(map_err(e));
+            }
+            // Returns when the broker has confirmed the subscription: what happens after that is delivered.
+            let confirmed = wait_ack(
+                &self.inner.core,
+                notify,
+                self.inner.ack_timeout,
+                |c: &MdCore| {
+                    (
+                        c.actual_state(id).unwrap_or(crate::core::SubState::Pending),
+                        c.failure(id).map(str::to_string),
+                    )
+                },
+            )
+            .await;
+            if let Err(e) = confirmed {
+                let _ = self.inner.ws.unsubscribe(&guid).await;
+                self.inner.core.lock().await.forget(&guid);
+                self.inner.emitter.unregister(id);
+                return Err(e);
+            }
+            self.inner.subs.write().await.insert(
+                id,
+                MdSubscription {
+                    id,
+                    instrument,
+                    kind,
+                    opts,
+                    guid,
+                },
+            );
+            Ok(id)
+        })
+        .await
     }
 }
 
@@ -247,20 +279,25 @@ impl brokapi_core::Connector for MarketDataConnector {
 #[async_trait]
 impl OrderBookSource for MarketDataConnector {
     async fn order_book(&self, id: &InstrumentId, depth: u32) -> Result<OrderBook, Error> {
-        self.acquire("GetOrderBook")?;
-        let (ticker, board) = ticker_board(id)?;
-        let wire = self
-            .inner
-            .http
-            .get_order_book(
-                exchange_of_board(&board),
-                &ticker,
-                Some(&board),
-                Some(depth.clamp(1, MAX_DEPTH)),
-            )
-            .await
-            .map_err(map_err)?;
-        Ok(order_book(&wire, id, brokapi_runtime::now()))
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetOrderBook")?;
+            let (ticker, board) = ticker_board(id)?;
+            let wire = self
+                .inner
+                .http
+                .get_order_book(
+                    exchange_of_board(&board),
+                    &ticker,
+                    Some(&board),
+                    Some(depth.clamp(1, MAX_DEPTH)),
+                )
+                .await
+                .map_err(map_err)?;
+            Ok(order_book(&wire, id, brokapi_runtime::now()))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_order_book(
@@ -268,77 +305,96 @@ impl OrderBookSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let depth = opts.depth.unwrap_or(WS_MAX_DEPTH).clamp(1, WS_MAX_DEPTH);
-        let (ticker, board) = ticker_board(id)?;
-        let guid = new_guid();
-        let ws = WsSubscribe::order_book(
-            &guid,
-            exchange_of_board(&board),
-            &ticker,
-            Some(&board),
-            depth,
-        );
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::OrderBook,
-            SubscriptionKind::OrderBook {
-                instrument: id.clone(),
+        let span = self.inner.span.clone();
+        async move {
+            let depth = opts.depth.unwrap_or(WS_MAX_DEPTH).clamp(1, WS_MAX_DEPTH);
+            let (ticker, board) = ticker_board(id)?;
+            let guid = new_guid();
+            let ws = WsSubscribe::order_book(
+                &guid,
+                exchange_of_board(&board),
+                &ticker,
+                Some(&board),
                 depth,
-            },
-            opts,
-            guid,
-            ws,
-        )
+            );
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::OrderBook,
+                SubscriptionKind::OrderBook {
+                    instrument: id.clone(),
+                    depth,
+                },
+                opts,
+                guid,
+                ws,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
     async fn unsubscribe(&self, sub: SubscriptionId) -> Result<(), Error> {
-        let record = self
-            .inner
-            .subs
-            .write()
-            .await
-            .remove(&sub)
-            .ok_or_else(|| Error::Rejected {
-                code: "unknown_subscription".into(),
-                message: format!("subscription {} is not active", sub.value()),
-            })?;
-        self.inner.core.lock().await.forget(&record.guid);
-        self.inner.emitter.unregister(sub);
-        self.inner
-            .ws
-            .unsubscribe(&record.guid)
-            .await
-            .map_err(map_err)
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Unsubscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            let record =
+                self.inner
+                    .subs
+                    .write()
+                    .await
+                    .remove(&sub)
+                    .ok_or_else(|| Error::Rejected {
+                        code: "unknown_subscription".into(),
+                        message: format!("subscription {} is not active", sub.value()),
+                    })?;
+            self.inner.core.lock().await.forget(&record.guid);
+            self.inner.emitter.unregister(sub);
+            self.inner
+                .ws
+                .unsubscribe(&record.guid)
+                .await
+                .map_err(map_err)
+        })
+        .await
     }
 }
 
 #[async_trait]
 impl MarketDataSource for MarketDataConnector {
     async fn last_trades(&self, id: &InstrumentId, limit: u32) -> Result<Vec<MarketTrade>, Error> {
-        self.acquire("GetLastTrades")?;
-        let (ticker, board) = ticker_board(id)?;
-        let query = [
-            ("take", limit.to_string()),
-            ("descending", "true".to_string()),
-        ];
-        let records = self
-            .inner
-            .http
-            .get_all_trades(exchange_of_board(&board), &ticker, Some(&board), &query)
-            .await
-            .map_err(map_err)?;
-        let now = brokapi_runtime::now();
-        // Newest first from the broker; the shared interface wants the oldest first.
-        let mut trades: Vec<MarketTrade> = records
-            .iter()
-            .rev()
-            .filter_map(|r| market_trade(r, id, now))
-            .collect();
-        if trades.len() > limit as usize {
-            trades.drain(..trades.len() - limit as usize);
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetLastTrades")?;
+            let (ticker, board) = ticker_board(id)?;
+            let query = [
+                ("take", limit.to_string()),
+                ("descending", "true".to_string()),
+            ];
+            let records = self
+                .inner
+                .http
+                .get_all_trades(exchange_of_board(&board), &ticker, Some(&board), &query)
+                .await
+                .map_err(map_err)?;
+            let now = brokapi_runtime::now();
+            // Newest first from the broker; the shared interface wants the oldest first.
+            let mut trades: Vec<MarketTrade> = records
+                .iter()
+                .rev()
+                .filter_map(|r| market_trade(r, id, now))
+                .collect();
+            if trades.len() > limit as usize {
+                trades.drain(..trades.len() - limit as usize);
+            }
+            Ok(trades)
         }
-        Ok(trades)
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_market_trades(
@@ -346,19 +402,25 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let (ticker, board) = ticker_board(id)?;
-        let guid = new_guid();
-        let ws = WsSubscribe::all_trades(&guid, exchange_of_board(&board), &ticker, Some(&board));
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::MarketTrades,
-            SubscriptionKind::LastTrades {
-                instrument: id.clone(),
-            },
-            opts,
-            guid,
-            ws,
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let (ticker, board) = ticker_board(id)?;
+            let guid = new_guid();
+            let ws =
+                WsSubscribe::all_trades(&guid, exchange_of_board(&board), &ticker, Some(&board));
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::MarketTrades,
+                SubscriptionKind::LastTrades {
+                    instrument: id.clone(),
+                },
+                opts,
+                guid,
+                ws,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -367,19 +429,24 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let (ticker, board) = ticker_board(id)?;
-        let guid = new_guid();
-        let ws = WsSubscribe::quotes(&guid, exchange_of_board(&board), &ticker, Some(&board));
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::Quotes,
-            SubscriptionKind::Quotes {
-                instrument: id.clone(),
-            },
-            opts,
-            guid,
-            ws,
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let (ticker, board) = ticker_board(id)?;
+            let guid = new_guid();
+            let ws = WsSubscribe::quotes(&guid, exchange_of_board(&board), &ticker, Some(&board));
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::Quotes,
+                SubscriptionKind::Quotes {
+                    instrument: id.clone(),
+                },
+                opts,
+                guid,
+                ws,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -389,23 +456,28 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         range: TimeRange,
     ) -> Result<Vec<Candle>, Error> {
-        self.acquire("GetCandles")?;
-        let (ticker, board) = ticker_board(id)?;
-        let resp = self
-            .inner
-            .http
-            .get_history(
-                exchange_of_board(&board),
-                &ticker,
-                Some(&board),
-                &timeframe_label(tf),
-                nanos_to_secs(range.from),
-                nanos_to_secs(range.to),
-                None,
-            )
-            .await
-            .map_err(map_err)?;
-        Ok(candles(&resp, id, tf, brokapi_runtime::now()))
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetCandles")?;
+            let (ticker, board) = ticker_board(id)?;
+            let resp = self
+                .inner
+                .http
+                .get_history(
+                    exchange_of_board(&board),
+                    &ticker,
+                    Some(&board),
+                    &timeframe_label(tf),
+                    nanos_to_secs(range.from),
+                    nanos_to_secs(range.to),
+                    None,
+                )
+                .await
+                .map_err(map_err)?;
+            Ok(candles(&resp, id, tf, brokapi_runtime::now()))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_candles(
@@ -414,30 +486,35 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let (ticker, board) = ticker_board(id)?;
-        let guid = new_guid();
-        // Only the candle that is forming now and the ones after it: the history is read with `candles`.
-        let from = nanos_to_secs(unix_nanos(chrono::Utc::now()));
-        let ws = WsSubscribe::bars(
-            &guid,
-            exchange_of_board(&board),
-            &ticker,
-            Some(&board),
-            &timeframe_label(tf),
-            from,
-            true,
-        );
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::Candles,
-            SubscriptionKind::LastCandle {
-                instrument: id.clone(),
-                timeframe: tf,
-            },
-            opts,
-            guid,
-            ws,
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let (ticker, board) = ticker_board(id)?;
+            let guid = new_guid();
+            // Only the candle that is forming now and the ones after it: the history is read with `candles`.
+            let from = nanos_to_secs(unix_nanos(chrono::Utc::now()));
+            let ws = WsSubscribe::bars(
+                &guid,
+                exchange_of_board(&board),
+                &ticker,
+                Some(&board),
+                &timeframe_label(tf),
+                from,
+                true,
+            );
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::Candles,
+                SubscriptionKind::LastCandle {
+                    instrument: id.clone(),
+                    timeframe: tf,
+                },
+                opts,
+                guid,
+                ws,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 }
@@ -445,79 +522,104 @@ impl MarketDataSource for MarketDataConnector {
 #[async_trait]
 impl InstrumentSource for MarketDataConnector {
     async fn find(&self, q: InstrumentQuery) -> Result<Vec<Instrument>, Error> {
-        self.acquire("GetSecurities")?;
-        match q {
-            InstrumentQuery::ByTicker { ticker, exchange } => {
-                let mut query = vec![("query", ticker.clone()), ("limit", "100".to_string())];
-                if let Some(e) = exchange {
-                    query.push(("exchange", e));
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetSecurities")?;
+            match q {
+                InstrumentQuery::ByTicker { ticker, exchange } => {
+                    let mut query = vec![("query", ticker.clone()), ("limit", "100".to_string())];
+                    if let Some(e) = exchange {
+                        query.push(("exchange", e));
+                    }
+                    // The search matches a part of the ticker: keep the exact ticker, in every board it trades in.
+                    query.push(("includeNonBaseBoards", "true".to_string()));
+                    let list = self
+                        .inner
+                        .http
+                        .get_securities(&query)
+                        .await
+                        .map_err(map_err)?;
+                    Ok(list
+                        .iter()
+                        .filter(|s| s.symbol.eq_ignore_ascii_case(&ticker))
+                        .map(instrument)
+                        .collect())
                 }
-                // The search matches a part of the ticker: keep the exact ticker, in every board it trades in.
-                query.push(("includeNonBaseBoards", "true".to_string()));
-                let list = self
-                    .inner
-                    .http
-                    .get_securities(&query)
-                    .await
-                    .map_err(map_err)?;
-                Ok(list
-                    .iter()
-                    .filter(|s| s.symbol.eq_ignore_ascii_case(&ticker))
-                    .map(instrument)
-                    .collect())
+                InstrumentQuery::ByIsin(_) => Err(Error::Unsupported {
+                    capability: "find_by_isin".into(),
+                }),
+                InstrumentQuery::ByKind(kind) => self.find_by_kind(kind).await,
             }
-            InstrumentQuery::ByIsin(_) => Err(Error::Unsupported {
-                capability: "find_by_isin".into(),
-            }),
-            InstrumentQuery::ByKind(kind) => self.find_by_kind(kind).await,
         }
+        .instrument(span)
+        .await
     }
 
     async fn get(&self, id: &InstrumentId) -> Result<Instrument, Error> {
-        self.acquire("GetSecurity")?;
-        let (ticker, board) = ticker_board(id)?;
-        let info = self
-            .inner
-            .http
-            .get_security(exchange_of_board(&board), &ticker, Some(&board))
-            .await
-            .map_err(map_err)?;
-        Ok(instrument(&info))
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetSecurity")?;
+            let (ticker, board) = ticker_board(id)?;
+            let info = self
+                .inner
+                .http
+                .get_security(exchange_of_board(&board), &ticker, Some(&board))
+                .await
+                .map_err(map_err)?;
+            Ok(instrument(&info))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn trading_params(&self, id: &InstrumentId) -> Result<TradingParams, Error> {
-        self.acquire("GetSecurity")?;
-        let (ticker, board) = ticker_board(id)?;
-        let info = self
-            .inner
-            .http
-            .get_security(exchange_of_board(&board), &ticker, Some(&board))
-            .await
-            .map_err(map_err)?;
-        Ok(trading_params(&info))
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetSecurity")?;
+            let (ticker, board) = ticker_board(id)?;
+            let info = self
+                .inner
+                .http
+                .get_security(exchange_of_board(&board), &ticker, Some(&board))
+                .await
+                .map_err(map_err)?;
+            Ok(trading_params(&info))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn trading_status(&self, id: &InstrumentId) -> Result<TradingStatus, Error> {
-        self.acquire("GetTradingStatus")?;
-        let (ticker, board) = ticker_board(id)?;
-        let info = self
-            .inner
-            .http
-            .get_security(exchange_of_board(&board), &ticker, Some(&board))
-            .await
-            .map_err(map_err)?;
-        let mut status = trading_status(&info, Some(unix_nanos(chrono::Utc::now())));
-        // The status is about the instrument asked for, in the board asked for.
-        status.instrument = id.clone();
-        Ok(status)
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetTradingStatus")?;
+            let (ticker, board) = ticker_board(id)?;
+            let info = self
+                .inner
+                .http
+                .get_security(exchange_of_board(&board), &ticker, Some(&board))
+                .await
+                .map_err(map_err)?;
+            let mut status = trading_status(&info, Some(unix_nanos(chrono::Utc::now())));
+            // The status is about the instrument asked for, in the board asked for.
+            status.instrument = id.clone();
+            Ok(status)
+        }
+        .instrument(span)
+        .await
     }
 
     async fn schedule(&self, _exchange: &str, _range: TimeRange) -> Result<Schedule, Error> {
-        // ALOR gives the state of a market now (`/md/status/...`) and the status code of an instrument, but no
-        // timetable of sessions.
-        Err(Error::Unsupported {
-            capability: "schedule".into(),
-        })
+        let span = self.inner.span.clone();
+        async move {
+            // ALOR gives the state of a market now (`/md/status/...`) and the status code of an instrument, but no
+            // timetable of sessions.
+            Err(Error::Unsupported {
+                capability: "schedule".into(),
+            })
+        }
+        .instrument(span)
+        .await
     }
 }
 

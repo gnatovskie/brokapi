@@ -230,7 +230,7 @@ fn read<T: serde::de::DeserializeOwned>(data: &serde_json::Value) -> Option<T> {
     match serde_json::from_value(data.clone()) {
         Ok(v) => Some(v),
         Err(e) => {
-            warn!("a data frame cannot be read: {e}");
+            warn!(error = %e, "data frame unreadable, dropped");
             None
         }
     }

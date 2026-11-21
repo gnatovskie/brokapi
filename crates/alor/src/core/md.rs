@@ -138,7 +138,7 @@ impl MdCore {
 
     fn on_data(&mut self, guid: &str, data: serde_json::Value, now: Instant, out: &mut EventSink) {
         let Some(entry) = self.by_guid.get_mut(guid) else {
-            debug!("a frame of an unknown subscription {guid} is dropped");
+            debug!(%guid, "frame of an unknown subscription dropped");
             return;
         };
         if entry.state != SubState::Active {
@@ -202,7 +202,7 @@ fn parse<T: serde::de::DeserializeOwned>(data: &serde_json::Value) -> Option<T> 
     match serde_json::from_value(data.clone()) {
         Ok(v) => Some(v),
         Err(e) => {
-            warn!("a data frame cannot be read: {e}");
+            warn!(error = %e, "data frame unreadable, dropped");
             None
         }
     }

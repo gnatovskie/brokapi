@@ -1202,6 +1202,11 @@ fn create_order(b: &mut Book, owner: &str, v: &Value) -> Response {
         if !(p / tick).fract().is_zero() {
             return refuse(10001, "params error: price invalid");
         }
+        // `minNotionalValue` of the instrument, as the exchange reads it: price times quantity. The connector does not
+        // check it, the exchange refuses (the code is the one the mock uses, not recorded from the exchange).
+        if p * qty < Decimal::from(5) {
+            return refuse(110094, "Order does not meet minimum order value 5USDT");
+        }
     }
     let link_id = v["orderLinkId"].as_str().unwrap_or("").to_string();
     if !link_id.is_empty()

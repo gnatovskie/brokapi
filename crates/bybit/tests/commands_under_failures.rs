@@ -291,3 +291,21 @@ async fn more_orders_than_a_page_are_all_listed() {
     assert_eq!(report.confirmed.len(), 120, "{report:?}");
     assert!(report.closed_offline.is_empty() && report.foreign.is_empty());
 }
+
+/// The connector checks the step and the smallest quantity of a symbol before it sends, but not the smallest value of an
+/// order (`minNotionalValue`). The exchange refuses it: `Rejected` with its code, nothing placed, sent once.
+#[tokio::test]
+async fn an_order_below_the_smallest_value_is_refused_by_the_exchange() {
+    let (opts, ud, _rx) = start().await;
+    let mut small = limit_buy();
+    small.price = Some(Price::new(dec!(0.1)));
+    match ud.place(small).await {
+        Err(Error::Rejected { code, .. }) => assert_eq!(code, "bybit_110094"),
+        other => panic!("expected Rejected, got {other:?}"),
+    }
+    assert_eq!(opts.order_commands.load(Ordering::SeqCst), 1, "sent once");
+    assert!(ud.active_orders().await.unwrap().is_empty());
+    ud.place(limit_buy())
+        .await
+        .expect("an order of enough value");
+}

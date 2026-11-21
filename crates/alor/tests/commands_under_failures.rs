@@ -274,3 +274,69 @@ async fn a_fill_lost_in_the_gap_of_the_socket_is_found_after_the_reconnect() {
     )
     .await;
 }
+
+/// The lot of the mock is 10: the broker counts lots, the bot pieces. Place, replace, stop and fill all convert, and a
+/// quantity that is not whole lots is refused before anything is sent (live runs had a lot of 1, futures only).
+#[tokio::test]
+async fn quantities_in_pieces_become_lots_and_come_back_as_pieces() {
+    let (opts, server, ud, _rx) = start().await;
+    let commands = || {
+        opts.order_commands
+            .load(std::sync::atomic::Ordering::SeqCst)
+    };
+
+    let mut req = limit_buy();
+    req.qty = Qty::from(30);
+    let cid = req.cid;
+    ud.place(req).await.unwrap();
+
+    let new_cid = ClientOrderId::new_v4();
+    ud.replace(ReplaceOrderRequest {
+        cid: new_cid,
+        original_cid: cid,
+        qty: Some(Qty::from(20)),
+        price: None,
+    })
+    .await
+    .unwrap();
+    let active = ud.active_orders().await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].cid, new_cid);
+    assert_eq!(active[0].qty, Qty::from(20), "2 lots are 20 pieces");
+
+    server.fill(
+        &new_cid.hyphenated().to_string(),
+        Qty::from(10),
+        Price::new(dec!(100)),
+    );
+    let snap = ud.order_state(new_cid).await.unwrap();
+    assert!(
+        matches!(snap.state, OrderState::PartiallyFilled { .. }),
+        "{snap:?}"
+    );
+    assert_eq!(snap.filled, Qty::from(10), "one lot is 10 pieces");
+
+    let mut stop_req = stop(StopOrderKind::StopLoss);
+    stop_req.qty = Qty::from(30);
+    ud.place_stop(stop_req).await.unwrap();
+    let stops = ud.active_stop_orders().await.unwrap();
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0].qty, Qty::from(30), "3 lots are 30 pieces");
+
+    let before = commands();
+    for q in ["5", "25"] {
+        let mut bad = stop(StopOrderKind::StopLoss);
+        bad.qty = q.parse().unwrap();
+        assert!(matches!(
+            ud.place_stop(bad).await,
+            Err(Error::Rejected { ref code, .. }) if code == "invalid_qty"
+        ));
+        let mut bad = limit_buy();
+        bad.qty = q.parse().unwrap();
+        assert!(matches!(
+            ud.place(bad).await,
+            Err(Error::Rejected { ref code, .. }) if code == "invalid_qty"
+        ));
+    }
+    assert_eq!(commands(), before, "nothing was sent for a broken quantity");
+}

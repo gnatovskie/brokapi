@@ -65,7 +65,7 @@ pub mod v1 {
 /// method by its name, see [`TbankClient::grpc`].
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/descriptor.bin"));
 
-pub use client::{AuthInterceptor, Authed, TbankClient};
+pub use client::{AuthInterceptor, Authed, Logged, TbankClient};
 pub use config::{PROD_ENDPOINT, SANDBOX_ENDPOINT, TbankConfig};
 pub use error::ProtocolError;
 pub use root_ca::{RUSSIAN_TRUSTED_ROOT_CA_PEM, trusts_russian_root};

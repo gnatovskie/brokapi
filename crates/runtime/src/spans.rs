@@ -129,13 +129,27 @@ impl fmt::Display for Op {
 /// A connector keeps it for its whole life: the tasks it spawns take it with [`Instrument::instrument`], its
 /// commands give it to [`op`] as the parent.
 pub fn connector(broker: &'static str, role: Role, account: Option<&str>) -> Span {
-    let account = account.map(brokapi_redact::mask_account);
-    tracing::error_span!(
-        "connector",
-        broker,
-        role = role.as_str(),
-        account = account.as_deref()
-    )
+    let span = tracing::error_span!("connector", broker, role = role.as_str(), account = Empty);
+    if let Some(account) = account {
+        record_account(&span, account);
+    }
+    span
+}
+
+/// Writes the account into a [`connector`] span, as a mask: for a connector that learns its account after the
+/// span is made (the only open account of a token).
+pub fn record_account(span: &Span, account: &str) {
+    span.record("account", brokapi_redact::mask_account(account).as_str());
+}
+
+/// Spawns a task of a connector in its span: the lines of the task show the broker, the role and the account,
+/// whoever started it.
+pub fn spawn_in<F>(span: &Span, work: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::spawn(work.instrument(span.clone()))
 }
 
 /// The span of a command, `op{op, cid, instrument, broker_order_id}`, inside the span of its connector.

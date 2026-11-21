@@ -817,46 +817,61 @@ impl OrderExecutor for UserDataConnector {
     }
 
     async fn order_state(&self, cid: ClientOrderId) -> Result<OrderSnapshot, Error> {
-        match self.find_record(cid).await? {
-            Some(rec) => {
-                self.inner.track(cid, &rec.order_id, &rec.symbol);
-                self.snapshot_of(cid, &rec)
+        let span = self.inner.span.clone();
+        async move {
+            match self.find_record(cid).await? {
+                Some(rec) => {
+                    self.inner.track(cid, &rec.order_id, &rec.symbol);
+                    self.snapshot_of(cid, &rec)
+                }
+                None => Err(Error::not_found(
+                    "the exchange has no order with this client order id",
+                )),
             }
-            None => Err(Error::not_found(
-                "the exchange has no order with this client order id",
-            )),
         }
+        .instrument(span)
+        .await
     }
 
     async fn active_orders(&self) -> Result<Vec<OrderSnapshot>, Error> {
-        // all_open_orders takes the quota of the pages after the first: the first is this call's.
-        self.acquire("GetOrders")?;
-        let records = self.all_open_orders().await?;
-        let now = brokapi_runtime::now();
-        let mut out = Vec::new();
-        let mut core = self.inner.core.lock().await;
-        for r in &records {
-            if is_untriggered(r) || is_final(r) {
-                continue;
+        let span = self.inner.span.clone();
+        async move {
+            // all_open_orders takes the quota of the pages after the first: the first is this call's.
+            self.acquire("GetOrders")?;
+            let records = self.all_open_orders().await?;
+            let now = brokapi_runtime::now();
+            let mut out = Vec::new();
+            let mut core = self.inner.core.lock().await;
+            for r in &records {
+                if is_untriggered(r) || is_final(r) {
+                    continue;
+                }
+                let cid = core.resolve_cid(&r.order_id, &r.order_link_id);
+                // Ours or not, the cid is remembered for the number: an order of another program can be cancelled by the
+                // made-up cid it was listed with.
+                self.inner.track(cid, &r.order_id, &r.symbol);
+                if let Some(snap) = order_snapshot(r, cid, &self.inner.category, now) {
+                    out.push(snap);
+                }
             }
-            let cid = core.resolve_cid(&r.order_id, &r.order_link_id);
-            // Ours or not, the cid is remembered for the number: an order of another program can be cancelled by the
-            // made-up cid it was listed with.
-            self.inner.track(cid, &r.order_id, &r.symbol);
-            if let Some(snap) = order_snapshot(r, cid, &self.inner.category, now) {
-                out.push(snap);
-            }
+            Ok(out)
         }
-        Ok(out)
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_order_state(&self) -> Result<SubscriptionId, Error> {
-        let opts = lossless(self.inner.order_state_buffer);
-        self.register_ud_sub(
-            UdSubKind::OrderState,
-            opts,
-            vec![order_topic(&self.inner.category)],
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let opts = lossless(self.inner.order_state_buffer);
+            self.register_ud_sub(
+                UdSubKind::OrderState,
+                opts,
+                vec![order_topic(&self.inner.category)],
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -974,6 +989,8 @@ fn lossless(cap: usize) -> SubscribeOpts {
 #[async_trait]
 impl ExecutionSource for UserDataConnector {
     async fn executions(&self, range: TimeRange) -> Result<Vec<Execution>, Error> {
+        let span = self.inner.span.clone();
+        async move {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let end = nanos_to_ms(range.to).min(now_ms);
         // The exchange keeps two years and answers a range of 7 days at most: the range is read in windows, the oldest
@@ -1035,15 +1052,21 @@ impl ExecutionSource for UserDataConnector {
         }
         out.sort_by_key(|e| e.ts.broker_ts.map(|t| t.as_nanos()).unwrap_or(0));
         Ok(out)
+        }.instrument(span).await
     }
 
     async fn subscribe_executions(&self) -> Result<SubscriptionId, Error> {
-        let opts = lossless(self.inner.order_state_buffer);
-        self.register_ud_sub(
-            UdSubKind::Executions,
-            opts,
-            vec![execution_topic(&self.inner.category)],
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let opts = lossless(self.inner.order_state_buffer);
+            self.register_ud_sub(
+                UdSubKind::Executions,
+                opts,
+                vec![execution_topic(&self.inner.category)],
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 }
@@ -1051,51 +1074,65 @@ impl ExecutionSource for UserDataConnector {
 #[async_trait]
 impl PortfolioSource for UserDataConnector {
     async fn portfolio(&self) -> Result<Portfolio, Error> {
-        self.read_portfolio().await
+        let span = self.inner.span.clone();
+        async move { self.read_portfolio().await }
+            .instrument(span)
+            .await
     }
 
     async fn positions(&self) -> Result<Vec<Position>, Error> {
-        Ok(self.read_portfolio().await?.positions)
+        let span = self.inner.span.clone();
+        async move { Ok(self.read_portfolio().await?.positions) }
+            .instrument(span)
+            .await
     }
 
     async fn balances(&self) -> Result<Vec<Balance>, Error> {
-        Ok(self.read_portfolio().await?.balances)
+        let span = self.inner.span.clone();
+        async move { Ok(self.read_portfolio().await?.balances) }
+            .instrument(span)
+            .await
     }
 
     async fn subscribe_portfolio(&self, opts: SubscribeOpts) -> Result<SubscriptionId, Error> {
-        let topics = vec![
-            position_topic(&self.inner.category),
-            WALLET_TOPIC.to_string(),
-        ];
-        let id = self
-            .register_ud_sub(UdSubKind::Portfolio, opts, topics)
-            .await?;
-        // The streams of the exchange send changes only, with no snapshot at the start. The first events are the
-        // positions and balances now, read once, so the reader starts from a whole picture.
-        match self.read_portfolio().await {
-            Ok(p) => {
-                let mut events = Vec::new();
-                if !p.positions.is_empty() {
-                    events.push(CoreEvent {
-                        sub: Some(id),
-                        payload: Event::Positions(p.positions),
-                    });
+        let span = self.inner.span.clone();
+        async move {
+            let topics = vec![
+                position_topic(&self.inner.category),
+                WALLET_TOPIC.to_string(),
+            ];
+            let id = self
+                .register_ud_sub(UdSubKind::Portfolio, opts, topics)
+                .await?;
+            // The streams of the exchange send changes only, with no snapshot at the start. The first events are the
+            // positions and balances now, read once, so the reader starts from a whole picture.
+            match self.read_portfolio().await {
+                Ok(p) => {
+                    let mut events = Vec::new();
+                    if !p.positions.is_empty() {
+                        events.push(CoreEvent {
+                            sub: Some(id),
+                            payload: Event::Positions(p.positions),
+                        });
+                    }
+                    if !p.balances.is_empty() {
+                        events.push(CoreEvent {
+                            sub: Some(id),
+                            payload: Event::Balances(p.balances),
+                        });
+                    }
+                    self.inner.emitter.emit(events);
+                    Ok(id)
                 }
-                if !p.balances.is_empty() {
-                    events.push(CoreEvent {
-                        sub: Some(id),
-                        payload: Event::Balances(p.balances),
-                    });
+                Err(e) => {
+                    self.inner.subs.write().await.remove(&id);
+                    self.drop_sub(id).await;
+                    Err(e)
                 }
-                self.inner.emitter.emit(events);
-                Ok(id)
-            }
-            Err(e) => {
-                self.inner.subs.write().await.remove(&id);
-                self.drop_sub(id).await;
-                Err(e)
             }
         }
+        .instrument(span)
+        .await
     }
 }
 
@@ -1221,25 +1258,35 @@ impl StopOrderExecutor for UserDataConnector {
     }
 
     async fn active_stop_orders(&self) -> Result<Vec<StopOrderSnapshot>, Error> {
-        self.acquire("GetOrders")?;
-        let records = self.all_open_orders().await?;
-        let now = brokapi_runtime::now();
-        let mut core = self.inner.core.lock().await;
-        let mut out = Vec::new();
-        for r in records.iter().filter(|r| is_untriggered(r)) {
-            let cid = core.resolve_cid(&r.order_id, &r.order_link_id);
-            self.inner.track(cid, &r.order_id, &r.symbol);
-            if let Some(s) = map_stop::snapshot(r, Some(cid), &self.inner.category, now) {
-                out.push(s);
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("GetOrders")?;
+            let records = self.all_open_orders().await?;
+            let now = brokapi_runtime::now();
+            let mut core = self.inner.core.lock().await;
+            let mut out = Vec::new();
+            for r in records.iter().filter(|r| is_untriggered(r)) {
+                let cid = core.resolve_cid(&r.order_id, &r.order_link_id);
+                self.inner.track(cid, &r.order_id, &r.symbol);
+                if let Some(s) = map_stop::snapshot(r, Some(cid), &self.inner.category, now) {
+                    out.push(s);
+                }
             }
+            Ok(out)
         }
-        Ok(out)
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_stop_orders(&self) -> Result<SubscriptionId, Error> {
-        // The shared events have no stop order event; the list is `active_stop_orders`.
-        Err(Error::Unsupported {
-            capability: "stop_order_stream".into(),
-        })
+        let span = self.inner.span.clone();
+        async move {
+            // The shared events have no stop order event; the list is `active_stop_orders`.
+            Err(Error::Unsupported {
+                capability: "stop_order_stream".into(),
+            })
+        }
+        .instrument(span)
+        .await
     }
 }

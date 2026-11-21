@@ -1,7 +1,9 @@
 //! gRPC channel with Bearer-token authorization.
 
-use std::time::Duration;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
+use tonic::codegen::{BoxFuture, Service, http};
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -90,7 +92,59 @@ impl Interceptor for AuthInterceptor {
 }
 
 /// Channel type every generated client is parameterised with.
-pub type Authed = InterceptedService<Channel, AuthInterceptor>;
+pub type Authed = InterceptedService<Logged, AuthInterceptor>;
+
+/// The channel with a line on `debug` for every call: the method (`OrdersService/PostOrder`), the HTTP status, the
+/// gRPC status when the answer carries it in its headers (a refusal does), and the time to the answer. For a stream
+/// the time is to its opening. Neither the token nor the messages are written.
+#[derive(Debug, Clone)]
+pub struct Logged {
+    channel: Channel,
+}
+
+impl Service<http::Request<tonic::body::Body>> for Logged {
+    type Response = http::Response<tonic::body::Body>;
+    type Error = tonic::transport::Error;
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.channel.poll_ready(cx)
+    }
+
+    fn call(&mut self, req: http::Request<tonic::body::Body>) -> Self::Future {
+        let method = short_method(req.uri().path());
+        let answer = self.channel.call(req);
+        Box::pin(async move {
+            let started = Instant::now();
+            let result = answer.await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            match &result {
+                Ok(resp) => {
+                    let grpc_status = resp
+                        .headers()
+                        .get("grpc-status")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("0")
+                        .to_owned();
+                    tracing::debug!(%method, status = resp.status().as_u16(), %grpc_status, latency_ms, "request done")
+                }
+                Err(e) => tracing::debug!(%method, latency_ms, error = %e, "request failed"),
+            }
+            result
+        })
+    }
+}
+
+/// `/tinkoff.public.invest.api.contract.v1.OrdersService/PostOrder` as `OrdersService/PostOrder`.
+fn short_method(path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    match path.split_once('/') {
+        Some((service, method)) => {
+            format!("{}/{method}", service.rsplit('.').next().unwrap_or(service))
+        }
+        None => path.to_owned(),
+    }
+}
 
 /// Shared HTTP/2 channel. Cheap to clone; each accessor returns a fresh generated client.
 ///
@@ -193,7 +247,10 @@ impl TbankClient {
     }
 
     fn with_auth(&self) -> Authed {
-        InterceptedService::new(self.channel.clone(), self.interceptor.clone())
+        let logged = Logged {
+            channel: self.channel.clone(),
+        };
+        InterceptedService::new(logged, self.interceptor.clone())
     }
 
     /// A generic gRPC client over the same channel and token, for a call that is not made through a
@@ -323,5 +380,20 @@ impl TbankClient {
             .get_accounts(crate::v1::GetAccountsRequest { status: None })
             .await?;
         Ok(resp.into_inner().accounts)
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::short_method;
+
+    #[test]
+    fn the_method_is_shown_without_its_package() {
+        assert_eq!(
+            short_method("/tinkoff.public.invest.api.contract.v1.OrdersService/PostOrder"),
+            "OrdersService/PostOrder"
+        );
+        assert_eq!(short_method("/Plain/Call"), "Plain/Call");
+        assert_eq!(short_method("odd"), "odd");
     }
 }

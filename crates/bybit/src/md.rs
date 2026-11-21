@@ -320,25 +320,30 @@ impl brokapi_core::Connector for MarketDataConnector {
 #[async_trait]
 impl OrderBookSource for MarketDataConnector {
     async fn order_book(&self, id: &InstrumentId, depth: u32) -> Result<OrderBook, Error> {
-        let symbol = self.symbol(id)?;
-        self.acquire("GetOrderBook")?;
-        let view = self
-            .inner
-            .http
-            .get_order_book(
-                &self.inner.category,
-                &symbol,
-                Some(depth.clamp(1, MAX_DEPTH)),
-            )
-            .await
-            .map_err(map_err)?;
-        Ok(order_book(
-            &view.bids,
-            &view.asks,
-            view.ts_ms,
-            id,
-            brokapi_runtime::now(),
-        ))
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            self.acquire("GetOrderBook")?;
+            let view = self
+                .inner
+                .http
+                .get_order_book(
+                    &self.inner.category,
+                    &symbol,
+                    Some(depth.clamp(1, MAX_DEPTH)),
+                )
+                .await
+                .map_err(map_err)?;
+            Ok(order_book(
+                &view.bids,
+                &view.asks,
+                view.ts_ms,
+                id,
+                brokapi_runtime::now(),
+            ))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_order_book(
@@ -346,25 +351,30 @@ impl OrderBookSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let symbol = self.symbol(id)?;
-        let depth = opts.depth.unwrap_or(DEFAULT_DEPTH).clamp(1, MAX_DEPTH);
-        // The stream has fixed depths: the smallest one that holds what was asked for, cut to `depth` by the core.
-        let stream_depth = STREAM_DEPTHS
-            .iter()
-            .copied()
-            .find(|d| *d >= depth)
-            .unwrap_or(MAX_DEPTH);
-        let topic = format!("orderbook.{stream_depth}.{symbol}");
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::OrderBook,
-            SubscriptionKind::OrderBook {
-                instrument: id.clone(),
-                depth,
-            },
-            opts,
-            topic,
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            let depth = opts.depth.unwrap_or(DEFAULT_DEPTH).clamp(1, MAX_DEPTH);
+            // The stream has fixed depths: the smallest one that holds what was asked for, cut to `depth` by the core.
+            let stream_depth = STREAM_DEPTHS
+                .iter()
+                .copied()
+                .find(|d| *d >= depth)
+                .unwrap_or(MAX_DEPTH);
+            let topic = format!("orderbook.{stream_depth}.{symbol}");
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::OrderBook,
+                SubscriptionKind::OrderBook {
+                    instrument: id.clone(),
+                    depth,
+                },
+                opts,
+                topic,
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -404,25 +414,30 @@ impl OrderBookSource for MarketDataConnector {
 #[async_trait]
 impl MarketDataSource for MarketDataConnector {
     async fn last_trades(&self, id: &InstrumentId, limit: u32) -> Result<Vec<MarketTrade>, Error> {
-        let symbol = self.symbol(id)?;
-        self.acquire("GetLastTrades")?;
-        let records = self
-            .inner
-            .http
-            .get_recent_trades(&self.inner.category, &symbol, limit.clamp(1, 1000))
-            .await
-            .map_err(map_err)?;
-        let now = brokapi_runtime::now();
-        // Newest first from the exchange; the shared interface wants the oldest first.
-        let mut trades: Vec<MarketTrade> = records
-            .iter()
-            .rev()
-            .filter_map(|r| market_trade(r, id, now))
-            .collect();
-        if trades.len() > limit as usize {
-            trades.drain(..trades.len() - limit as usize);
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            self.acquire("GetLastTrades")?;
+            let records = self
+                .inner
+                .http
+                .get_recent_trades(&self.inner.category, &symbol, limit.clamp(1, 1000))
+                .await
+                .map_err(map_err)?;
+            let now = brokapi_runtime::now();
+            // Newest first from the exchange; the shared interface wants the oldest first.
+            let mut trades: Vec<MarketTrade> = records
+                .iter()
+                .rev()
+                .filter_map(|r| market_trade(r, id, now))
+                .collect();
+            if trades.len() > limit as usize {
+                trades.drain(..trades.len() - limit as usize);
+            }
+            Ok(trades)
         }
-        Ok(trades)
+        .instrument(span)
+        .await
     }
 
     async fn subscribe_market_trades(
@@ -430,16 +445,21 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let symbol = self.symbol(id)?;
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::MarketTrades,
-            SubscriptionKind::LastTrades {
-                instrument: id.clone(),
-            },
-            opts,
-            format!("publicTrade.{symbol}"),
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::MarketTrades,
+                SubscriptionKind::LastTrades {
+                    instrument: id.clone(),
+                },
+                opts,
+                format!("publicTrade.{symbol}"),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -448,17 +468,22 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let symbol = self.symbol(id)?;
-        // The best level of the book is the quote: the level 1 stream pushes it within 10 ms of a change.
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::Quotes,
-            SubscriptionKind::Quotes {
-                instrument: id.clone(),
-            },
-            opts,
-            format!("orderbook.1.{symbol}"),
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            // The best level of the book is the quote: the level 1 stream pushes it within 10 ms of a change.
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::Quotes,
+                SubscriptionKind::Quotes {
+                    instrument: id.clone(),
+                },
+                opts,
+                format!("orderbook.1.{symbol}"),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 
@@ -468,6 +493,8 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         range: TimeRange,
     ) -> Result<Vec<Candle>, Error> {
+        let span = self.inner.span.clone();
+        async move {
         let symbol = self.symbol(id)?;
         let interval = interval_label(tf).ok_or_else(|| Error::Unsupported {
             capability: "candles_m10".into(),
@@ -506,6 +533,7 @@ impl MarketDataSource for MarketDataConnector {
             .filter(|k| k.start_ms < nanos_to_ms(range.to))
             .map(|k| candle(k, id, tf, now))
             .collect())
+        }.instrument(span).await
     }
 
     fn candles_max_span(&self, tf: Timeframe) -> Option<Duration> {
@@ -519,20 +547,25 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let symbol = self.symbol(id)?;
-        let interval = interval_label(tf).ok_or_else(|| Error::Unsupported {
-            capability: "candles_m10".into(),
-        })?;
-        self.register_md_sub(
-            id.clone(),
-            MdSubKind::Candles,
-            SubscriptionKind::LastCandle {
-                instrument: id.clone(),
-                timeframe: tf,
-            },
-            opts,
-            format!("kline.{interval}.{symbol}"),
-        )
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            let interval = interval_label(tf).ok_or_else(|| Error::Unsupported {
+                capability: "candles_m10".into(),
+            })?;
+            self.register_md_sub(
+                id.clone(),
+                MdSubKind::Candles,
+                SubscriptionKind::LastCandle {
+                    instrument: id.clone(),
+                    timeframe: tf,
+                },
+                opts,
+                format!("kline.{interval}.{symbol}"),
+            )
+            .await
+        }
+        .instrument(span)
         .await
     }
 }
@@ -540,81 +573,106 @@ impl MarketDataSource for MarketDataConnector {
 #[async_trait]
 impl InstrumentSource for MarketDataConnector {
     async fn find(&self, q: InstrumentQuery) -> Result<Vec<Instrument>, Error> {
-        match q {
-            InstrumentQuery::ByTicker { ticker, exchange } => {
-                // The exchange is one: BYBIT, or the category written the way the key does.
-                if exchange.as_deref().is_some_and(|e| {
-                    !e.eq_ignore_ascii_case("BYBIT")
-                        && !e.eq_ignore_ascii_case(&self.inner.category)
-                }) {
-                    return Ok(Vec::new());
+        let span = self.inner.span.clone();
+        async move {
+            match q {
+                InstrumentQuery::ByTicker { ticker, exchange } => {
+                    // The exchange is one: BYBIT, or the category written the way the key does.
+                    if exchange.as_deref().is_some_and(|e| {
+                        !e.eq_ignore_ascii_case("BYBIT")
+                            && !e.eq_ignore_ascii_case(&self.inner.category)
+                    }) {
+                        return Ok(Vec::new());
+                    }
+                    self.acquire("GetInstruments")?;
+                    match self
+                        .inner
+                        .http
+                        .get_instrument(&self.inner.category, &ticker.to_ascii_uppercase())
+                        .await
+                    {
+                        Ok(info) => Ok(vec![instrument(&info, &self.inner.category)]),
+                        Err(e) => match map_err(e) {
+                            e if e.is_not_found() => Ok(Vec::new()),
+                            e => Err(e),
+                        },
+                    }
                 }
-                self.acquire("GetInstruments")?;
-                match self
-                    .inner
-                    .http
-                    .get_instrument(&self.inner.category, &ticker.to_ascii_uppercase())
-                    .await
-                {
-                    Ok(info) => Ok(vec![instrument(&info, &self.inner.category)]),
-                    Err(e) => match map_err(e) {
-                        e if e.is_not_found() => Ok(Vec::new()),
-                        e => Err(e),
-                    },
-                }
+                InstrumentQuery::ByIsin(_) => Err(Error::Unsupported {
+                    capability: "find_by_isin".into(),
+                }),
+                InstrumentQuery::ByKind(kind) => self.find_by_kind(kind).await,
             }
-            InstrumentQuery::ByIsin(_) => Err(Error::Unsupported {
-                capability: "find_by_isin".into(),
-            }),
-            InstrumentQuery::ByKind(kind) => self.find_by_kind(kind).await,
         }
+        .instrument(span)
+        .await
     }
 
     async fn get(&self, id: &InstrumentId) -> Result<Instrument, Error> {
-        let symbol = self.symbol(id)?;
-        self.acquire("GetInstruments")?;
-        let info = self
-            .inner
-            .http
-            .get_instrument(&self.inner.category, &symbol)
-            .await
-            .map_err(map_err)?;
-        Ok(instrument(&info, &self.inner.category))
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            self.acquire("GetInstruments")?;
+            let info = self
+                .inner
+                .http
+                .get_instrument(&self.inner.category, &symbol)
+                .await
+                .map_err(map_err)?;
+            Ok(instrument(&info, &self.inner.category))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn trading_params(&self, id: &InstrumentId) -> Result<TradingParams, Error> {
-        let symbol = self.symbol(id)?;
-        self.acquire("GetInstruments")?;
-        let info = self
-            .inner
-            .http
-            .get_instrument(&self.inner.category, &symbol)
-            .await
-            .map_err(map_err)?;
-        Ok(trading_params(&info, &self.inner.category))
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            self.acquire("GetInstruments")?;
+            let info = self
+                .inner
+                .http
+                .get_instrument(&self.inner.category, &symbol)
+                .await
+                .map_err(map_err)?;
+            Ok(trading_params(&info, &self.inner.category))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn trading_status(&self, id: &InstrumentId) -> Result<TradingStatus, Error> {
-        let symbol = self.symbol(id)?;
-        self.acquire("GetInstruments")?;
-        let info = self
-            .inner
-            .http
-            .get_instrument(&self.inner.category, &symbol)
-            .await
-            .map_err(map_err)?;
-        Ok(trading_status(
-            &info,
-            &self.inner.category,
-            Some(unix_now_nanos()),
-        ))
+        let span = self.inner.span.clone();
+        async move {
+            let symbol = self.symbol(id)?;
+            self.acquire("GetInstruments")?;
+            let info = self
+                .inner
+                .http
+                .get_instrument(&self.inner.category, &symbol)
+                .await
+                .map_err(map_err)?;
+            Ok(trading_status(
+                &info,
+                &self.inner.category,
+                Some(unix_now_nanos()),
+            ))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn schedule(&self, _exchange: &str, _range: TimeRange) -> Result<Schedule, Error> {
-        // A crypto exchange trades round the clock: there is no timetable of sessions.
-        Err(Error::Unsupported {
-            capability: "schedule".into(),
-        })
+        let span = self.inner.span.clone();
+        async move {
+            // A crypto exchange trades round the clock: there is no timetable of sessions.
+            Err(Error::Unsupported {
+                capability: "schedule".into(),
+            })
+        }
+        .instrument(span)
+        .await
     }
 }
 

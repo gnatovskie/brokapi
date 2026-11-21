@@ -22,6 +22,7 @@ prost-types = "0.14"
 thiserror.workspace = true
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "tls-ring", "tls-webpki-roots"] }
 tonic-prost = "0.14"
+tracing.workspace = true
 
 [build-dependencies]
 prost = "0.14"

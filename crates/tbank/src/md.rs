@@ -26,6 +26,7 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::Request;
+use tracing::Instrument as _;
 use tracing::warn;
 
 use crate::config::{MD_MAX_PING, MarketDataConfig, effective_ping, silence_limit};
@@ -42,6 +43,8 @@ use crate::util::{SubIdGen, query};
 const DEFAULT_DEPTH: u32 = 20;
 
 struct Shared {
+    /// `connector{broker, role, account}`: the tasks run in it, the commands take it as the parent.
+    span: tracing::Span,
     client: TbankClient,
     limiter: Arc<BrokerLimiter>,
     emitter: Arc<Emitter>,
@@ -336,9 +339,20 @@ impl MarketDataConnector {
         limiter: Arc<BrokerLimiter>,
         out: mpsc::Sender<Envelope>,
     ) -> Result<Self, Error> {
+        let span =
+            brokapi_runtime::spans::connector("tbank", brokapi_runtime::spans::Role::Md, None);
+        Self::start_in(cfg, limiter, out).instrument(span).await
+    }
+
+    async fn start_in(
+        cfg: MarketDataConfig,
+        limiter: Arc<BrokerLimiter>,
+        out: mpsc::Sender<Envelope>,
+    ) -> Result<Self, Error> {
         let client = TbankClient::new(&cfg.tbank).map_err(|e| config(e.to_string()))?;
         let ping = effective_ping(cfg.ping_interval, MD_MAX_PING);
         let inner = Arc::new(Shared {
+            span: tracing::Span::current(),
             client,
             limiter,
             emitter: Emitter::new(cfg.source, out),
@@ -354,7 +368,8 @@ impl MarketDataConnector {
             closing: AtomicBool::new(false),
             cancel: CancellationToken::new(),
         });
-        let pump = tokio::spawn(Arc::clone(&inner).run());
+        let pump = tokio::spawn(Arc::clone(&inner).run().in_current_span());
+        brokapi_runtime::spans::started();
         Ok(Self { inner, pump })
     }
 
@@ -502,6 +517,17 @@ impl MarketDataConnector {
     /// # }
     /// ```
     pub async fn shutdown(self, mode: ShutdownMode) -> ShutdownReport {
+        let span = self.inner.span.clone();
+        async move {
+            let report = self.shutdown_in(mode).await;
+            brokapi_runtime::spans::stopped(&report);
+            report
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn shutdown_in(self, mode: ShutdownMode) -> ShutdownReport {
         let inner = &self.inner;
         inner.closing.store(true, Ordering::SeqCst);
         let (mut ok, mut failed) = (0, 0);
@@ -685,25 +711,30 @@ impl OrderBookSource for MarketDataConnector {
     /// # }
     /// ```
     async fn order_book(&self, id: &InstrumentId, depth: u32) -> Result<OrderBook, Error> {
-        let lot = self.inner.lot_of(id).await?;
-        self.acquire("GetOrderBook")?;
-        let req = pb::GetOrderBookRequest {
-            depth: market::wire_depth(depth) as i32,
-            instrument_id: Some(Self::id_ref(id)),
-            ..Default::default()
-        };
-        let mut c = self.inner.client.market_data();
-        let r = query(self.inner.request_timeout, c.get_order_book(req)).await?;
-        let mut book = market::book_snapshot(
-            id,
-            &r.bids,
-            &r.asks,
-            depth.max(1) as usize,
-            r.orderbook_ts.as_ref(),
-            brokapi_runtime::now(),
-        );
-        scale_book(&mut book, brokapi_core::Decimal::from(lot));
-        Ok(book)
+        let span = self.inner.span.clone();
+        async move {
+            let lot = self.inner.lot_of(id).await?;
+            self.acquire("GetOrderBook")?;
+            let req = pb::GetOrderBookRequest {
+                depth: market::wire_depth(depth) as i32,
+                instrument_id: Some(Self::id_ref(id)),
+                ..Default::default()
+            };
+            let mut c = self.inner.client.market_data();
+            let r = query(self.inner.request_timeout, c.get_order_book(req)).await?;
+            let mut book = market::book_snapshot(
+                id,
+                &r.bids,
+                &r.asks,
+                depth.max(1) as usize,
+                r.orderbook_ts.as_ref(),
+                brokapi_runtime::now(),
+            );
+            scale_book(&mut book, brokapi_core::Decimal::from(lot));
+            Ok(book)
+        }
+        .instrument(span)
+        .await
     }
 
     /// Streams the order book as full snapshots.
@@ -761,18 +792,27 @@ impl OrderBookSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        let depth = opts
-            .depth
-            .unwrap_or(DEFAULT_DEPTH)
-            .clamp(1, market::MAX_DEPTH);
-        self.subscribe(
-            id,
-            SubscriptionKind::OrderBook {
-                instrument: id.clone(),
-                depth,
-            },
-            opts,
-        )
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            Some(&id.key),
+        );
+        brokapi_runtime::spans::command(span, async move {
+            let depth = opts
+                .depth
+                .unwrap_or(DEFAULT_DEPTH)
+                .clamp(1, market::MAX_DEPTH);
+            self.subscribe(
+                id,
+                SubscriptionKind::OrderBook {
+                    instrument: id.clone(),
+                    depth,
+                },
+                opts,
+            )
+            .await
+        })
         .await
     }
 
@@ -786,21 +826,30 @@ impl OrderBookSource for MarketDataConnector {
     /// [`Error::Rejected`] with code `unknown_subscription` when the id is not active (never made,
     /// or already ended).
     async fn unsubscribe(&self, sub: SubscriptionId) -> Result<(), Error> {
-        let known = self
-            .inner
-            .subs
-            .lock()
-            .expect("subs poisoned")
-            .iter()
-            .any(|s| s.id == sub);
-        if !known {
-            return Err(Error::Rejected {
-                code: "unknown_subscription".into(),
-                message: format!("subscription {} is not active", sub.value()),
-            });
-        }
-        self.drop_sub(sub);
-        Ok(())
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Unsubscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            let known = self
+                .inner
+                .subs
+                .lock()
+                .expect("subs poisoned")
+                .iter()
+                .any(|s| s.id == sub);
+            if !known {
+                return Err(Error::Rejected {
+                    code: "unknown_subscription".into(),
+                    message: format!("subscription {} is not active", sub.value()),
+                });
+            }
+            self.drop_sub(sub);
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -815,33 +864,38 @@ impl MarketDataSource for MarketDataConnector {
     ///
     /// The same as [`order_book`](OrderBookSource::order_book).
     async fn last_trades(&self, id: &InstrumentId, limit: u32) -> Result<Vec<MarketTrade>, Error> {
-        let lot = self.inner.lot_of(id).await?;
-        self.acquire("GetLastTrades")?;
-        let now = crate::ids::wall_nanos();
-        let req = pb::GetLastTradesRequest {
-            from: Some(nanos_to_proto(UnixNanos::from_nanos(
-                now.as_nanos() - 3_600_000_000_000,
-            ))),
-            to: Some(nanos_to_proto(now)),
-            instrument_id: Some(Self::id_ref(id)),
-            ..Default::default()
-        };
-        let mut c = self.inner.client.market_data();
-        let r = query(self.inner.request_timeout, c.get_last_trades(req)).await?;
-        let rx = brokapi_runtime::now();
-        let mut trades: Vec<MarketTrade> = r
-            .trades
-            .iter()
-            .filter_map(|t| market::trade(id, t, rx))
-            .collect();
-        trades
-            .iter_mut()
-            .for_each(|t| scale_trade(t, brokapi_core::Decimal::from(lot)));
-        let keep = limit as usize;
-        if trades.len() > keep {
-            trades.drain(..trades.len() - keep);
+        let span = self.inner.span.clone();
+        async move {
+            let lot = self.inner.lot_of(id).await?;
+            self.acquire("GetLastTrades")?;
+            let now = crate::ids::wall_nanos();
+            let req = pb::GetLastTradesRequest {
+                from: Some(nanos_to_proto(UnixNanos::from_nanos(
+                    now.as_nanos() - 3_600_000_000_000,
+                ))),
+                to: Some(nanos_to_proto(now)),
+                instrument_id: Some(Self::id_ref(id)),
+                ..Default::default()
+            };
+            let mut c = self.inner.client.market_data();
+            let r = query(self.inner.request_timeout, c.get_last_trades(req)).await?;
+            let rx = brokapi_runtime::now();
+            let mut trades: Vec<MarketTrade> = r
+                .trades
+                .iter()
+                .filter_map(|t| market::trade(id, t, rx))
+                .collect();
+            trades
+                .iter_mut()
+                .for_each(|t| scale_trade(t, brokapi_core::Decimal::from(lot)));
+            let keep = limit as usize;
+            if trades.len() > keep {
+                trades.drain(..trades.len() - keep);
+            }
+            Ok(trades)
         }
-        Ok(trades)
+        .instrument(span)
+        .await
     }
 
     /// Streams anonymous market trades as they happen.
@@ -856,13 +910,22 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        self.subscribe(
-            id,
-            SubscriptionKind::LastTrades {
-                instrument: id.clone(),
-            },
-            opts,
-        )
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            Some(&id.key),
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.subscribe(
+                id,
+                SubscriptionKind::LastTrades {
+                    instrument: id.clone(),
+                },
+                opts,
+            )
+            .await
+        })
         .await
     }
 
@@ -879,13 +942,22 @@ impl MarketDataSource for MarketDataConnector {
         id: &InstrumentId,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        self.subscribe(
-            id,
-            SubscriptionKind::Quotes {
-                instrument: id.clone(),
-            },
-            opts,
-        )
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            Some(&id.key),
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.subscribe(
+                id,
+                SubscriptionKind::Quotes {
+                    instrument: id.clone(),
+                },
+                opts,
+            )
+            .await
+        })
         .await
     }
 
@@ -943,27 +1015,32 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         range: TimeRange,
     ) -> Result<Vec<Candle>, Error> {
-        let lot = self.inner.lot_of(id).await?;
-        self.acquire("GetCandles")?;
-        let req = pb::GetCandlesRequest {
-            from: Some(nanos_to_proto(range.from)),
-            to: Some(nanos_to_proto(range.to)),
-            interval: market::candle_interval(tf) as i32,
-            instrument_id: Some(Self::id_ref(id)),
-            ..Default::default()
-        };
-        let mut c = self.inner.client.market_data();
-        let r = query(self.inner.request_timeout, c.get_candles(req)).await?;
-        let rx = brokapi_runtime::now();
-        let mut candles: Vec<Candle> = r
-            .candles
-            .iter()
-            .map(|x| market::historic_candle(id, tf, x, rx))
-            .collect();
-        candles
-            .iter_mut()
-            .for_each(|c| scale_candle(c, brokapi_core::Decimal::from(lot)));
-        Ok(candles)
+        let span = self.inner.span.clone();
+        async move {
+            let lot = self.inner.lot_of(id).await?;
+            self.acquire("GetCandles")?;
+            let req = pb::GetCandlesRequest {
+                from: Some(nanos_to_proto(range.from)),
+                to: Some(nanos_to_proto(range.to)),
+                interval: market::candle_interval(tf) as i32,
+                instrument_id: Some(Self::id_ref(id)),
+                ..Default::default()
+            };
+            let mut c = self.inner.client.market_data();
+            let r = query(self.inner.request_timeout, c.get_candles(req)).await?;
+            let rx = brokapi_runtime::now();
+            let mut candles: Vec<Candle> = r
+                .candles
+                .iter()
+                .map(|x| market::historic_candle(id, tf, x, rx))
+                .collect();
+            candles
+                .iter_mut()
+                .for_each(|c| scale_candle(c, brokapi_core::Decimal::from(lot)));
+            Ok(candles)
+        }
+        .instrument(span)
+        .await
     }
 
     /// The longest span one `GetCandles` request may cover, per timeframe, from the T-Invest
@@ -997,14 +1074,23 @@ impl MarketDataSource for MarketDataConnector {
         tf: Timeframe,
         opts: SubscribeOpts,
     ) -> Result<SubscriptionId, Error> {
-        self.subscribe(
-            id,
-            SubscriptionKind::LastCandle {
-                instrument: id.clone(),
-                timeframe: tf,
-            },
-            opts,
-        )
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            Some(&id.key),
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.subscribe(
+                id,
+                SubscriptionKind::LastCandle {
+                    instrument: id.clone(),
+                    timeframe: tf,
+                },
+                opts,
+            )
+            .await
+        })
         .await
     }
 }
@@ -1169,36 +1255,41 @@ impl InstrumentSource for MarketDataConnector {
     /// # }
     /// ```
     async fn find(&self, q: InstrumentQuery) -> Result<Vec<Instrument>, Error> {
-        let (text, ticker, class, isin) = match q {
-            InstrumentQuery::ByTicker { ticker, exchange } => {
-                (ticker.clone(), Some(ticker), exchange, None)
-            }
-            InstrumentQuery::ByIsin(isin) => (isin.clone(), None, None, Some(isin)),
-            InstrumentQuery::ByKind(kind) => return self.list_kind(kind).await,
-        };
-        self.acquire("FindInstrument")?;
-        let req = pb::FindInstrumentRequest {
-            query: text,
-            instrument_kind: None,
-            api_trade_available_flag: None,
-        };
-        let mut c = self.inner.client.instruments();
-        let r = query(self.inner.request_timeout, c.find_instrument(req)).await?;
-        Ok(r.instruments
-            .iter()
-            .filter(|i| {
-                ticker
-                    .as_ref()
-                    .is_none_or(|t| i.ticker.eq_ignore_ascii_case(t))
-            })
-            .filter(|i| {
-                class
-                    .as_ref()
-                    .is_none_or(|c| i.class_code.eq_ignore_ascii_case(c))
-            })
-            .filter(|i| isin.as_ref().is_none_or(|x| i.isin.eq_ignore_ascii_case(x)))
-            .map(map_instrument::instrument_from_short)
-            .collect())
+        let span = self.inner.span.clone();
+        async move {
+            let (text, ticker, class, isin) = match q {
+                InstrumentQuery::ByTicker { ticker, exchange } => {
+                    (ticker.clone(), Some(ticker), exchange, None)
+                }
+                InstrumentQuery::ByIsin(isin) => (isin.clone(), None, None, Some(isin)),
+                InstrumentQuery::ByKind(kind) => return self.list_kind(kind).await,
+            };
+            self.acquire("FindInstrument")?;
+            let req = pb::FindInstrumentRequest {
+                query: text,
+                instrument_kind: None,
+                api_trade_available_flag: None,
+            };
+            let mut c = self.inner.client.instruments();
+            let r = query(self.inner.request_timeout, c.find_instrument(req)).await?;
+            Ok(r.instruments
+                .iter()
+                .filter(|i| {
+                    ticker
+                        .as_ref()
+                        .is_none_or(|t| i.ticker.eq_ignore_ascii_case(t))
+                })
+                .filter(|i| {
+                    class
+                        .as_ref()
+                        .is_none_or(|c| i.class_code.eq_ignore_ascii_case(c))
+                })
+                .filter(|i| isin.as_ref().is_none_or(|x| i.isin.eq_ignore_ascii_case(x)))
+                .map(map_instrument::instrument_from_short)
+                .collect())
+        }
+        .instrument(span)
+        .await
     }
 
     /// The full record of one instrument (`GetInstrumentBy`), including its currency.
@@ -1208,9 +1299,14 @@ impl InstrumentSource for MarketDataConnector {
     /// [`Error::Rejected`] (code `not_found`) when the broker does not know the instrument, and the
     /// other errors of [`order_book`](OrderBookSource::order_book).
     async fn get(&self, id: &InstrumentId) -> Result<Instrument, Error> {
-        Ok(map_instrument::instrument_from_full(
-            &self.instrument_by(id).await?,
-        ))
+        let span = self.inner.span.clone();
+        async move {
+            Ok(map_instrument::instrument_from_full(
+                &self.instrument_by(id).await?,
+            ))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Lot size, price step and currency of an instrument.
@@ -1223,8 +1319,13 @@ impl InstrumentSource for MarketDataConnector {
     ///
     /// The same as [`get`](InstrumentSource::get).
     async fn trading_params(&self, id: &InstrumentId) -> Result<TradingParams, Error> {
-        let i = self.instrument_by(id).await?;
-        Ok(map_instrument::trading_params(id, &i))
+        let span = self.inner.span.clone();
+        async move {
+            let i = self.instrument_by(id).await?;
+            Ok(map_instrument::trading_params(id, &i))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Whether trading is going on now (`GetTradingStatus`).
@@ -1237,15 +1338,20 @@ impl InstrumentSource for MarketDataConnector {
     ///
     /// The same as [`get`](InstrumentSource::get).
     async fn trading_status(&self, id: &InstrumentId) -> Result<TradingStatus, Error> {
-        require_native(id)?;
-        self.acquire("GetTradingStatus")?;
-        let req = pb::GetTradingStatusRequest {
-            instrument_id: Some(Self::id_ref(id)),
-            ..Default::default()
-        };
-        let mut c = self.inner.client.market_data();
-        let r = query(self.inner.request_timeout, c.get_trading_status(req)).await?;
-        Ok(map_instrument::trading_status(id, r.trading_status()))
+        let span = self.inner.span.clone();
+        async move {
+            require_native(id)?;
+            self.acquire("GetTradingStatus")?;
+            let req = pb::GetTradingStatusRequest {
+                instrument_id: Some(Self::id_ref(id)),
+                ..Default::default()
+            };
+            let mut c = self.inner.client.market_data();
+            let r = query(self.inner.request_timeout, c.get_trading_status(req)).await?;
+            Ok(map_instrument::trading_status(id, r.trading_status()))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Trading sessions of an exchange in `range` (`TradingSchedules`).
@@ -1258,26 +1364,31 @@ impl InstrumentSource for MarketDataConnector {
     ///
     /// The same as [`order_book`](OrderBookSource::order_book).
     async fn schedule(&self, exchange: &str, range: TimeRange) -> Result<Schedule, Error> {
-        self.acquire("TradingSchedules")?;
-        let req = pb::TradingSchedulesRequest {
-            exchange: (!exchange.is_empty()).then(|| exchange.to_string()),
-            from: Some(nanos_to_proto(range.from)),
-            to: Some(nanos_to_proto(range.to)),
-        };
-        let mut c = self.inner.client.instruments();
-        let r = query(self.inner.request_timeout, c.trading_schedules(req)).await?;
-        let found = r
-            .exchanges
-            .iter()
-            .find(|s| s.exchange.eq_ignore_ascii_case(exchange))
-            .or_else(|| r.exchanges.first());
-        match found {
-            Some(s) => Ok(map_schedule::schedule(exchange, s, brokapi_runtime::now())),
-            None => Ok(Schedule {
-                exchange: exchange.to_string(),
-                sessions: Vec::new(),
-                ts: stamps(brokapi_runtime::now(), None),
-            }),
+        let span = self.inner.span.clone();
+        async move {
+            self.acquire("TradingSchedules")?;
+            let req = pb::TradingSchedulesRequest {
+                exchange: (!exchange.is_empty()).then(|| exchange.to_string()),
+                from: Some(nanos_to_proto(range.from)),
+                to: Some(nanos_to_proto(range.to)),
+            };
+            let mut c = self.inner.client.instruments();
+            let r = query(self.inner.request_timeout, c.trading_schedules(req)).await?;
+            let found = r
+                .exchanges
+                .iter()
+                .find(|s| s.exchange.eq_ignore_ascii_case(exchange))
+                .or_else(|| r.exchanges.first());
+            match found {
+                Some(s) => Ok(map_schedule::schedule(exchange, s, brokapi_runtime::now())),
+                None => Ok(Schedule {
+                    exchange: exchange.to_string(),
+                    sessions: Vec::new(),
+                    ts: stamps(brokapi_runtime::now(), None),
+                }),
+            }
         }
+        .instrument(span)
+        .await
     }
 }

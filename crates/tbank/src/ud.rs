@@ -25,6 +25,7 @@ use brokapi_tbank_protocol::v1 as pb;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 use tracing::warn;
 
 use crate::config::{UD_MAX_PING, UserDataConfig, effective_ping, silence_limit};
@@ -243,6 +244,8 @@ impl StopBook {
 }
 
 struct Shared {
+    /// `connector{broker, role, account}`: the tasks run in it, the commands take it as the parent.
+    span: tracing::Span,
     client: TbankClient,
     limiter: Arc<BrokerLimiter>,
     emitter: Arc<Emitter>,
@@ -311,7 +314,7 @@ impl Shared {
             self.request_timeout,
             self.cancel.child_token(),
         );
-        tokio::spawn(async move {
+        brokapi_runtime::spans::spawn_in(&self.span, async move {
             if limiter
                 .acquire("GetOrders", brokapi_runtime::now())
                 .is_err()
@@ -434,7 +437,7 @@ impl Shared {
                 frame = rx.recv() => {
                     let Some(frame) = frame else { return };
                     if let UdFrame::StreamFailed(kind, reason) = &frame {
-                        warn!(?kind, %reason, "stream refused for good");
+                        tracing::error!(?kind, %reason, "stream refused for good");
                         // A dead stream of orders or fills is a hole that never closes: no trading until the
                         // user has looked (and reconnected with a new connector).
                         if matches!(kind, StreamKind::OrderState | StreamKind::Trades) {
@@ -482,17 +485,20 @@ impl Shared {
                     };
                     async move { c.order_state_stream(req).await.map(|r| r.into_inner()) }
                 };
-                tokio::spawn(supervise(
-                    "order_state",
-                    open,
-                    move || UdFrame::Connected(kind),
-                    UdFrame::OrderState,
-                    move |reason| UdFrame::StreamFailed(kind, reason),
-                    tx,
-                    stale,
-                    last_error,
-                    t,
-                ))
+                brokapi_runtime::spans::spawn_in(
+                    &self.span,
+                    supervise(
+                        "order_state",
+                        open,
+                        move || UdFrame::Connected(kind),
+                        UdFrame::OrderState,
+                        move |reason| UdFrame::StreamFailed(kind, reason),
+                        tx,
+                        stale,
+                        last_error,
+                        t,
+                    ),
+                )
             }
             StreamKind::Trades => {
                 let open = move || {
@@ -503,17 +509,20 @@ impl Shared {
                     };
                     async move { c.trades_stream(req).await.map(|r| r.into_inner()) }
                 };
-                tokio::spawn(supervise(
-                    "trades",
-                    open,
-                    move || UdFrame::Connected(kind),
-                    UdFrame::Trades,
-                    move |reason| UdFrame::StreamFailed(kind, reason),
-                    tx,
-                    stale,
-                    last_error,
-                    t,
-                ))
+                brokapi_runtime::spans::spawn_in(
+                    &self.span,
+                    supervise(
+                        "trades",
+                        open,
+                        move || UdFrame::Connected(kind),
+                        UdFrame::Trades,
+                        move |reason| UdFrame::StreamFailed(kind, reason),
+                        tx,
+                        stale,
+                        last_error,
+                        t,
+                    ),
+                )
             }
             StreamKind::Portfolio => {
                 let open = move || {
@@ -526,17 +535,20 @@ impl Shared {
                     };
                     async move { c.portfolio_stream(req).await.map(|r| r.into_inner()) }
                 };
-                tokio::spawn(supervise(
-                    "portfolio",
-                    open,
-                    move || UdFrame::Connected(kind),
-                    UdFrame::Portfolio,
-                    move |reason| UdFrame::StreamFailed(kind, reason),
-                    tx,
-                    stale,
-                    last_error,
-                    t,
-                ))
+                brokapi_runtime::spans::spawn_in(
+                    &self.span,
+                    supervise(
+                        "portfolio",
+                        open,
+                        move || UdFrame::Connected(kind),
+                        UdFrame::Portfolio,
+                        move |reason| UdFrame::StreamFailed(kind, reason),
+                        tx,
+                        stale,
+                        last_error,
+                        t,
+                    ),
+                )
             }
             StreamKind::Positions => {
                 let open = move || {
@@ -550,17 +562,20 @@ impl Shared {
                     };
                     async move { c.positions_stream(req).await.map(|r| r.into_inner()) }
                 };
-                tokio::spawn(supervise(
-                    "positions",
-                    open,
-                    move || UdFrame::Connected(kind),
-                    UdFrame::Positions,
-                    move |reason| UdFrame::StreamFailed(kind, reason),
-                    tx,
-                    stale,
-                    last_error,
-                    t,
-                ))
+                brokapi_runtime::spans::spawn_in(
+                    &self.span,
+                    supervise(
+                        "positions",
+                        open,
+                        move || UdFrame::Connected(kind),
+                        UdFrame::Positions,
+                        move |reason| UdFrame::StreamFailed(kind, reason),
+                        tx,
+                        stale,
+                        last_error,
+                        t,
+                    ),
+                )
             }
         };
         streams.insert(kind, (token, handle));
@@ -794,11 +809,22 @@ impl UserDataConnector {
         limiter: Arc<BrokerLimiter>,
         out: mpsc::Sender<Envelope>,
     ) -> Result<Self, Error> {
+        let span =
+            brokapi_runtime::spans::connector("tbank", brokapi_runtime::spans::Role::Ud, None);
+        Self::start_in(cfg, limiter, out).instrument(span).await
+    }
+
+    async fn start_in(
+        cfg: UserDataConfig,
+        limiter: Arc<BrokerLimiter>,
+        out: mpsc::Sender<Envelope>,
+    ) -> Result<Self, Error> {
         let client = TbankClient::new(&cfg.tbank).map_err(|e| config(e.to_string()))?;
         let account = match cfg.tbank.account_id.clone() {
             Some(a) => a,
             None => pick_account(&client, cfg.tbank.request_timeout).await?,
         };
+        brokapi_runtime::spans::record_account(&tracing::Span::current(), &account);
         let (frames, rx) = mpsc::channel(1024);
         let ctl = ShutdownController::new(CommandGate::new());
         let cancel = ctl.child_token();
@@ -807,6 +833,7 @@ impl UserDataConnector {
         core.set_command_timeout(cfg.tbank.request_timeout + Duration::from_secs(10));
         let lots = Arc::clone(core.lots());
         let inner = Arc::new(Shared {
+            span: tracing::Span::current(),
             client,
             limiter,
             emitter: Emitter::new(cfg.source, out),
@@ -828,7 +855,8 @@ impl UserDataConnector {
             sandbox: cfg.tbank.sandbox,
             cancel,
         });
-        let pump = tokio::spawn(Arc::clone(&inner).pump(rx));
+        let pump = tokio::spawn(Arc::clone(&inner).pump(rx).in_current_span());
+        brokapi_runtime::spans::started();
         Ok(Self { inner, pump })
     }
 
@@ -1006,6 +1034,17 @@ impl UserDataConnector {
     /// # }
     /// ```
     pub async fn shutdown(self, mode: ShutdownMode) -> ShutdownReport {
+        let span = self.inner.span.clone();
+        async move {
+            let report = self.shutdown_in(mode).await;
+            brokapi_runtime::spans::stopped(&report);
+            report
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn shutdown_in(self, mode: ShutdownMode) -> ShutdownReport {
         let inner = &self.inner;
         let now = brokapi_runtime::now();
         inner
@@ -1483,90 +1522,99 @@ impl OrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn place(&self, req: PlaceOrderRequest) -> Result<OrderAck, Error> {
-        self.check_command()?;
-        // Units to lots. A quantity that is not a whole number of lots is refused here, before the
-        // quota and the cid are spent. The first order on an instrument reads its lot size.
-        let lot = self
-            .lot_of(&req.instrument)
-            .await
-            .map_err(|e| self.used_up(req.cid, e))?;
-        let lots = pieces_to_lots(req.qty, lot)?;
-        let price = match (req.order_type, req.price) {
-            (OrderType::Limit, Some(p)) if p.is_positive() => {
-                // Before a quota is spent or the cid is marked.
-                self.inner.price_grid.check(&req.instrument.key, p)?;
-                Some(price_to_quotation(p)?)
-            }
-            (OrderType::Limit, _) => {
-                return Err(Error::Rejected {
-                    code: "missing_price".into(),
-                    message: "a limit order needs a positive price".into(),
-                });
-            }
-            (OrderType::Market, _) => None,
-        };
-        self.acquire("PostOrder")?;
-        // Waits for earlier commands on this instrument, released on every exit path.
-        let _instrument = self.inner.locks.lock(&req.instrument).await;
-        // The gate may have closed while this command stood in the queue (degraded, shutdown): ask again
-        // before the cid is marked and anything is sent.
-        self.check_command()?;
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Place,
+            Some(req.cid),
+            Some(&req.instrument.key),
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.check_command()?;
+            // Units to lots. A quantity that is not a whole number of lots is refused here, before the
+            // quota and the cid are spent. The first order on an instrument reads its lot size.
+            let lot = self
+                .lot_of(&req.instrument)
+                .await
+                .map_err(|e| self.used_up(req.cid, e))?;
+            let lots = pieces_to_lots(req.qty, lot)?;
+            let price = match (req.order_type, req.price) {
+                (OrderType::Limit, Some(p)) if p.is_positive() => {
+                    // Before a quota is spent or the cid is marked.
+                    self.inner.price_grid.check(&req.instrument.key, p)?;
+                    Some(price_to_quotation(p)?)
+                }
+                (OrderType::Limit, _) => {
+                    return Err(Error::Rejected {
+                        code: "missing_price".into(),
+                        message: "a limit order needs a positive price".into(),
+                    });
+                }
+                (OrderType::Market, _) => None,
+            };
+            self.acquire("PostOrder")?;
+            // Waits for earlier commands on this instrument, released on every exit path.
+            let _instrument = self.inner.locks.lock(&req.instrument).await;
+            // The gate may have closed while this command stood in the queue (degraded, shutdown): ask again
+            // before the cid is marked and anything is sent.
+            self.check_command()?;
 
-        let now = brokapi_runtime::now();
-        self.core(|c, _| c.begin_place(&req, now))?;
+            let now = brokapi_runtime::now();
+            self.core(|c, _| c.begin_place(&req, now))?;
 
-        let wire = pb::PostOrderRequest {
-            quantity: lots,
-            price,
-            direction: map_order::direction(req.side) as i32,
-            account_id: self.account(),
-            order_type: map_order::wire_order_type(req.order_type) as i32,
-            order_id: req.cid.hyphenated().to_string(),
-            instrument_id: instrument_ref(&req.instrument),
-            ..Default::default()
-        };
-        let cid = req.cid;
-        let inner = Arc::clone(&self.inner);
-        // From here the cid is marked and the order is in flight. The request, the answer and the update
-        // of the order run as a task of their own: if the caller drops this future (a timeout around it, a
-        // lost `select!`), the task still ends and the order does not stay in flight for ever.
-        let work = async move {
-            let _instrument = _instrument;
-            let mut c = inner.client.orders();
-            let outcome = command(inner.request_timeout, c.post_order(wire)).await;
-            match outcome {
-                CommandOutcome::Done(resp) => {
-                    inner.with_core(|c, s| c.place_response(cid, &resp, now, s));
-                    if resp.execution_report_status()
-                        == pb::OrderExecutionReportStatus::ExecutionReportStatusRejected
-                    {
-                        return Err(Error::Rejected {
-                            code: "REJECTED".into(),
-                            message: resp.message,
-                        });
+            let wire = pb::PostOrderRequest {
+                quantity: lots,
+                price,
+                direction: map_order::direction(req.side) as i32,
+                account_id: self.account(),
+                order_type: map_order::wire_order_type(req.order_type) as i32,
+                order_id: req.cid.hyphenated().to_string(),
+                instrument_id: instrument_ref(&req.instrument),
+                ..Default::default()
+            };
+            let cid = req.cid;
+            let inner = Arc::clone(&self.inner);
+            // From here the cid is marked and the order is in flight. The request, the answer and the update
+            // of the order run as a task of their own: if the caller drops this future (a timeout around it, a
+            // lost `select!`), the task still ends and the order does not stay in flight for ever.
+            let work = async move {
+                let _instrument = _instrument;
+                let mut c = inner.client.orders();
+                let outcome = command(inner.request_timeout, c.post_order(wire)).await;
+                match outcome {
+                    CommandOutcome::Done(resp) => {
+                        inner.with_core(|c, s| c.place_response(cid, &resp, now, s));
+                        if resp.execution_report_status()
+                            == pb::OrderExecutionReportStatus::ExecutionReportStatusRejected
+                        {
+                            return Err(Error::Rejected {
+                                code: "REJECTED".into(),
+                                message: resp.message,
+                            });
+                        }
+                        Ok(OrderAck {
+                            cid,
+                            broker_id: BrokerOrderId::new(resp.order_id),
+                            ts: stamps(now, None),
+                        })
                     }
-                    Ok(OrderAck {
-                        cid,
-                        broker_id: BrokerOrderId::new(resp.order_id),
-                        ts: stamps(now, None),
-                    })
+                    CommandOutcome::Refused(status, err) => {
+                        let reason = format!("{:?}: {}", status.code(), status.message());
+                        inner.with_core(|c, s| c.place_rejected(cid, reason, now, s));
+                        Err(err)
+                    }
+                    CommandOutcome::Unknown => {
+                        inner.with_core(|c, s| c.place_unknown(cid, now, s));
+                        Err(Error::Unknown)
+                    }
                 }
-                CommandOutcome::Refused(status, err) => {
-                    let reason = format!("{:?}: {}", status.code(), status.message());
-                    inner.with_core(|c, s| c.place_rejected(cid, reason, now, s));
-                    Err(err)
-                }
-                CommandOutcome::Unknown => {
-                    inner.with_core(|c, s| c.place_unknown(cid, now, s));
-                    Err(Error::Unknown)
-                }
+            };
+            match brokapi_runtime::run_detached(work).await {
+                Some(result) => result,
+                // The task was torn down with the runtime: the order may exist.
+                None => Err(Error::Unknown),
             }
-        };
-        match brokapi_runtime::run_detached(work).await {
-            Some(result) => result,
-            // The task was torn down with the runtime: the order may exist.
-            None => Err(Error::Unknown),
-        }
+        })
+        .await
     }
 
     /// Cancels an order by the `cid` you placed it with (`CancelOrder` by request id).
@@ -1624,31 +1672,40 @@ impl OrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn cancel(&self, cid: ClientOrderId) -> Result<(), Error> {
-        self.check_command()?;
-        self.acquire("CancelOrder")?;
-        // The instrument comes from the connector's order registry; an unknown order is not serialized.
-        let instrument = self.core(|c, _| c.instrument_of(cid));
-        let _instrument = match &instrument {
-            Some(i) => Some(self.inner.locks.lock(i).await),
-            None => None,
-        };
-        // The gate may have closed while this command stood in the queue.
-        self.check_command()?;
-        let wire = pb::CancelOrderRequest {
-            account_id: self.account(),
-            order_id: cid.hyphenated().to_string(),
-            order_id_type: Some(pb::OrderIdType::Request as i32),
-        };
-        let mut c = self.inner.client.orders();
-        match command(self.inner.request_timeout, c.cancel_order(wire)).await {
-            CommandOutcome::Done(_) => {
-                let now = brokapi_runtime::now();
-                self.core(|c, s| c.cancel_ok(cid, now, s));
-                Ok(())
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Cancel,
+            Some(cid),
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.check_command()?;
+            self.acquire("CancelOrder")?;
+            // The instrument comes from the connector's order registry; an unknown order is not serialized.
+            let instrument = self.core(|c, _| c.instrument_of(cid));
+            let _instrument = match &instrument {
+                Some(i) => Some(self.inner.locks.lock(i).await),
+                None => None,
+            };
+            // The gate may have closed while this command stood in the queue.
+            self.check_command()?;
+            let wire = pb::CancelOrderRequest {
+                account_id: self.account(),
+                order_id: cid.hyphenated().to_string(),
+                order_id_type: Some(pb::OrderIdType::Request as i32),
+            };
+            let mut c = self.inner.client.orders();
+            match command(self.inner.request_timeout, c.cancel_order(wire)).await {
+                CommandOutcome::Done(_) => {
+                    let now = brokapi_runtime::now();
+                    self.core(|c, s| c.cancel_ok(cid, now, s));
+                    Ok(())
+                }
+                CommandOutcome::Refused(_, err) => Err(err),
+                CommandOutcome::Unknown => Err(Error::Unknown),
             }
-            CommandOutcome::Refused(_, err) => Err(err),
-            CommandOutcome::Unknown => Err(Error::Unknown),
-        }
+        })
+        .await
     }
 
     /// `ReplaceOrder` needs the exchange order id and the quantity: both come from what the connector
@@ -1719,90 +1776,99 @@ impl OrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn replace(&self, req: ReplaceOrderRequest) -> Result<OrderAck, Error> {
-        self.check_command()?;
-        let original = req.original_cid;
-        // The request has no instrument: it is the original order's. Not in the registry - one
-        // GetOrderState teaches it (before the lock: the exchange id is read only under the lock,
-        // a replace queued before this one changes it).
-        let used_up = |e| self.used_up(req.cid, e);
-        let mut instrument = self.core(|c, _| c.instrument_of(original));
-        if instrument.is_none() {
-            let st = self
-                .get_state(original.hyphenated().to_string(), true)
-                .await
-                .map_err(used_up)?;
-            let parts = self.parts_of(&st).await.map_err(used_up)?;
-            self.core(|c, _| c.note_order(&parts));
-            instrument = self.core(|c, _| c.instrument_of(original));
-        }
-        let instrument =
-            instrument.ok_or_else(|| Error::not_found("the original order is not known"))?;
-        // Input is checked before anything is sent or any quota is spent: units to lots.
-        let lot = self.lot_of(&instrument).await.map_err(used_up)?;
-        let requested_lots = req.qty.map(|q| pieces_to_lots(q, lot)).transpose()?;
-        if let Some(p) = req.price {
-            self.inner.price_grid.check(&instrument.key, p)?;
-        }
-        self.acquire("ReplaceOrder")?;
-        let _instrument = Some(self.inner.locks.lock(&instrument).await);
-        // The gate may have closed while this command stood in the queue.
-        self.check_command()?;
-        let known_id = self.core(|c, _| c.exchange_id(original).map(str::to_string));
-        let known_basis = self.core(|c, _| c.order_basis(original));
-        let (exchange_id, base_qty, base_price) = match (known_id, known_basis) {
-            (Some(id), Some((q, p))) => (id, q, p),
-            _ => {
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Replace,
+            Some(req.cid),
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.check_command()?;
+            let original = req.original_cid;
+            // The request has no instrument: it is the original order's. Not in the registry - one
+            // GetOrderState teaches it (before the lock: the exchange id is read only under the lock,
+            // a replace queued before this one changes it).
+            let used_up = |e| self.used_up(req.cid, e);
+            let mut instrument = self.core(|c, _| c.instrument_of(original));
+            if instrument.is_none() {
                 let st = self
                     .get_state(original.hyphenated().to_string(), true)
                     .await
                     .map_err(used_up)?;
                 let parts = self.parts_of(&st).await.map_err(used_up)?;
                 self.core(|c, _| c.note_order(&parts));
-                (st.order_id, parts.qty_requested(), parts.unit_price)
+                instrument = self.core(|c, _| c.instrument_of(original));
             }
-        };
-        let lots = match requested_lots {
-            Some(lots) => lots,
-            None => pieces_to_lots(base_qty, lot)?,
-        };
-        let price = req
-            .price
-            .or(base_price)
-            .map(price_to_quotation)
-            .transpose()?;
+            let instrument =
+                instrument.ok_or_else(|| Error::not_found("the original order is not known"))?;
+            // Input is checked before anything is sent or any quota is spent: units to lots.
+            let lot = self.lot_of(&instrument).await.map_err(used_up)?;
+            let requested_lots = req.qty.map(|q| pieces_to_lots(q, lot)).transpose()?;
+            if let Some(p) = req.price {
+                self.inner.price_grid.check(&instrument.key, p)?;
+            }
+            self.acquire("ReplaceOrder")?;
+            let _instrument = Some(self.inner.locks.lock(&instrument).await);
+            // The gate may have closed while this command stood in the queue.
+            self.check_command()?;
+            let known_id = self.core(|c, _| c.exchange_id(original).map(str::to_string));
+            let known_basis = self.core(|c, _| c.order_basis(original));
+            let (exchange_id, base_qty, base_price) = match (known_id, known_basis) {
+                (Some(id), Some((q, p))) => (id, q, p),
+                _ => {
+                    let st = self
+                        .get_state(original.hyphenated().to_string(), true)
+                        .await
+                        .map_err(used_up)?;
+                    let parts = self.parts_of(&st).await.map_err(used_up)?;
+                    self.core(|c, _| c.note_order(&parts));
+                    (st.order_id, parts.qty_requested(), parts.unit_price)
+                }
+            };
+            let lots = match requested_lots {
+                Some(lots) => lots,
+                None => pieces_to_lots(base_qty, lot)?,
+            };
+            let price = req
+                .price
+                .or(base_price)
+                .map(price_to_quotation)
+                .transpose()?;
 
-        let now = brokapi_runtime::now();
-        self.core(|c, _| c.begin_replace(req.cid, original, now))?;
-        let wire = pb::ReplaceOrderRequest {
-            account_id: self.account(),
-            order_id: exchange_id,
-            idempotency_key: req.cid.hyphenated().to_string(),
-            quantity: lots,
-            price,
-            price_type: None,
-            confirm_margin_trade: false,
-        };
-        let mut c = self.inner.client.orders();
-        let cid = req.cid;
-        match command(self.inner.request_timeout, c.replace_order(wire)).await {
-            CommandOutcome::Done(resp) => {
-                self.core(|c, s| c.replace_response(cid, &resp, now, s));
-                Ok(OrderAck {
-                    cid,
-                    broker_id: BrokerOrderId::new(resp.order_id),
-                    ts: stamps(now, None),
-                })
+            let now = brokapi_runtime::now();
+            self.core(|c, _| c.begin_replace(req.cid, original, now))?;
+            let wire = pb::ReplaceOrderRequest {
+                account_id: self.account(),
+                order_id: exchange_id,
+                idempotency_key: req.cid.hyphenated().to_string(),
+                quantity: lots,
+                price,
+                price_type: None,
+                confirm_margin_trade: false,
+            };
+            let mut c = self.inner.client.orders();
+            let cid = req.cid;
+            match command(self.inner.request_timeout, c.replace_order(wire)).await {
+                CommandOutcome::Done(resp) => {
+                    self.core(|c, s| c.replace_response(cid, &resp, now, s));
+                    Ok(OrderAck {
+                        cid,
+                        broker_id: BrokerOrderId::new(resp.order_id),
+                        ts: stamps(now, None),
+                    })
+                }
+                CommandOutcome::Refused(status, err) => {
+                    let reason = format!("{:?}: {}", status.code(), status.message());
+                    self.core(|c, s| c.replace_failed(cid, false, reason, now, s));
+                    Err(err)
+                }
+                CommandOutcome::Unknown => {
+                    self.core(|c, s| c.replace_failed(cid, true, String::new(), now, s));
+                    Err(Error::Unknown)
+                }
             }
-            CommandOutcome::Refused(status, err) => {
-                let reason = format!("{:?}: {}", status.code(), status.message());
-                self.core(|c, s| c.replace_failed(cid, false, reason, now, s));
-                Err(err)
-            }
-            CommandOutcome::Unknown => {
-                self.core(|c, s| c.replace_failed(cid, true, String::new(), now, s));
-                Err(Error::Unknown)
-            }
-        }
+        })
+        .await
     }
 
     /// The current state of one order by its `cid` (`GetOrderState` by request id).
@@ -1859,10 +1925,15 @@ impl OrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn order_state(&self, cid: ClientOrderId) -> Result<OrderSnapshot, Error> {
-        let st = self.get_state(cid.hyphenated().to_string(), true).await?;
-        let parts = self.parts_of(&st).await?;
-        self.core(|c, _| c.note_order(&parts));
-        Ok(map_order::snapshot(&parts, brokapi_runtime::now()))
+        let span = self.inner.span.clone();
+        async move {
+            let st = self.get_state(cid.hyphenated().to_string(), true).await?;
+            let parts = self.parts_of(&st).await?;
+            self.core(|c, _| c.note_order(&parts));
+            Ok(map_order::snapshot(&parts, brokapi_runtime::now()))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Orders that are live at the broker now (`GetOrders`) for this account.
@@ -1914,7 +1985,10 @@ impl OrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn active_orders(&self) -> Result<Vec<OrderSnapshot>, Error> {
-        self.get_active().await
+        let span = self.inner.span.clone();
+        async move { self.get_active().await }
+            .instrument(span)
+            .await
     }
 
     /// Streams the state changes of your orders (`OrderStateStream`), Lossless.
@@ -1983,14 +2057,23 @@ impl OrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn subscribe_order_state(&self) -> Result<SubscriptionId, Error> {
-        // Own order states are never dropped: Lossless only.
-        let opts = SubscribeOpts {
-            backpressure: Backpressure::Lossless {
-                cap: self.inner.order_state_buffer,
-            },
-            depth: None,
-        };
-        self.subscribe(UdSubKind::OrderState, opts).await
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            // Own order states are never dropped: Lossless only.
+            let opts = SubscribeOpts {
+                backpressure: Backpressure::Lossless {
+                    cap: self.inner.order_state_buffer,
+                },
+                depth: None,
+            };
+            self.subscribe(UdSubKind::OrderState, opts).await
+        })
+        .await
     }
 
     /// One `GetOrders` call: the live orders at the broker are compared with the ledger. A cid in
@@ -2049,23 +2132,32 @@ impl OrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn reconcile(&self, ledger: &[ClientOrderId]) -> Result<ReconcileReport, Error> {
-        let active = self.get_active().await?;
-        let ledger_snaps: Vec<OrderSnapshot> = active
-            .iter()
-            .filter(|o| ledger.contains(&o.cid))
-            .cloned()
-            .collect();
-        let mut report = reconcile_ledger(&ledger_snaps, &active);
-        for cid in ledger {
-            if !active.iter().any(|o| o.cid == *cid) && !report.closed_offline.contains(cid) {
-                report.closed_offline.push(*cid);
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Reconcile,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            let active = self.get_active().await?;
+            let ledger_snaps: Vec<OrderSnapshot> = active
+                .iter()
+                .filter(|o| ledger.contains(&o.cid))
+                .cloned()
+                .collect();
+            let mut report = reconcile_ledger(&ledger_snaps, &active);
+            for cid in ledger {
+                if !active.iter().any(|o| o.cid == *cid) && !report.closed_offline.contains(cid) {
+                    report.closed_offline.push(*cid);
+                }
             }
-        }
-        self.inner.emitter.clear_degraded();
-        let mut ctl = self.inner.ctl.lock().expect("ctl poisoned");
-        ctl.gate_mut().clear_degraded();
-        ctl.gate_mut().mark_reconciled();
-        Ok(report)
+            self.inner.emitter.clear_degraded();
+            let mut ctl = self.inner.ctl.lock().expect("ctl poisoned");
+            ctl.gate_mut().clear_degraded();
+            ctl.gate_mut().mark_reconciled();
+            Ok(report)
+        })
+        .await
     }
 }
 
@@ -2116,47 +2208,52 @@ impl ExecutionSource for UserDataConnector {
     /// # }
     /// ```
     async fn executions(&self, range: TimeRange) -> Result<Vec<Execution>, Error> {
-        let mut out = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..MAX_HISTORY_PAGES {
-            self.acquire("GetOperationsByCursor")?;
-            let req = pb::GetOperationsByCursorRequest {
-                account_id: self.account(),
-                from: Some(nanos_to_proto(range.from)),
-                to: Some(nanos_to_proto(range.to)),
-                cursor: cursor.clone(),
-                limit: Some(1000),
-                // Margin-call trades and trades paid by card are trades of the account as well.
-                operation_types: vec![
-                    pb::OperationType::Buy as i32,
-                    pb::OperationType::Sell as i32,
-                    pb::OperationType::BuyMargin as i32,
-                    pb::OperationType::SellMargin as i32,
-                    pb::OperationType::BuyCard as i32,
-                    pb::OperationType::SellCard as i32,
-                ],
-                state: Some(pb::OperationState::Executed as i32),
-                without_trades: Some(false),
-                ..Default::default()
-            };
-            let mut c = self.inner.client.operations();
-            let r = query(self.inner.request_timeout, c.get_operations_by_cursor(req)).await?;
-            let now = brokapi_runtime::now();
-            for item in &r.items {
-                out.extend(execution::from_operation(item, now));
+        let span = self.inner.span.clone();
+        async move {
+            let mut out = Vec::new();
+            let mut cursor: Option<String> = None;
+            for _ in 0..MAX_HISTORY_PAGES {
+                self.acquire("GetOperationsByCursor")?;
+                let req = pb::GetOperationsByCursorRequest {
+                    account_id: self.account(),
+                    from: Some(nanos_to_proto(range.from)),
+                    to: Some(nanos_to_proto(range.to)),
+                    cursor: cursor.clone(),
+                    limit: Some(1000),
+                    // Margin-call trades and trades paid by card are trades of the account as well.
+                    operation_types: vec![
+                        pb::OperationType::Buy as i32,
+                        pb::OperationType::Sell as i32,
+                        pb::OperationType::BuyMargin as i32,
+                        pb::OperationType::SellMargin as i32,
+                        pb::OperationType::BuyCard as i32,
+                        pb::OperationType::SellCard as i32,
+                    ],
+                    state: Some(pb::OperationState::Executed as i32),
+                    without_trades: Some(false),
+                    ..Default::default()
+                };
+                let mut c = self.inner.client.operations();
+                let r = query(self.inner.request_timeout, c.get_operations_by_cursor(req)).await?;
+                let now = brokapi_runtime::now();
+                for item in &r.items {
+                    out.extend(execution::from_operation(item, now));
+                }
+                if !r.has_next || r.next_cursor.is_empty() {
+                    return Ok(out);
+                }
+                cursor = Some(r.next_cursor);
             }
-            if !r.has_next || r.next_cursor.is_empty() {
-                return Ok(out);
-            }
-            cursor = Some(r.next_cursor);
+            Err(Error::Rejected {
+                code: "range_too_long".into(),
+                message: format!(
+                    "the range holds more than {} operations; read it in shorter ranges",
+                    MAX_HISTORY_PAGES * 1000
+                ),
+            })
         }
-        Err(Error::Rejected {
-            code: "range_too_long".into(),
-            message: format!(
-                "the range holds more than {} operations; read it in shorter ranges",
-                MAX_HISTORY_PAGES * 1000
-            ),
-        })
+        .instrument(span)
+        .await
     }
 
     /// Own trades as they happen (`TradesStream`), Lossless.
@@ -2196,13 +2293,22 @@ impl ExecutionSource for UserDataConnector {
     /// # }
     /// ```
     async fn subscribe_executions(&self) -> Result<SubscriptionId, Error> {
-        let opts = SubscribeOpts {
-            backpressure: Backpressure::Lossless {
-                cap: self.inner.order_state_buffer,
-            },
-            depth: None,
-        };
-        self.subscribe(UdSubKind::Executions, opts).await
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            let opts = SubscribeOpts {
+                backpressure: Backpressure::Lossless {
+                    cap: self.inner.order_state_buffer,
+                },
+                depth: None,
+            };
+            self.subscribe(UdSubKind::Executions, opts).await
+        })
+        .await
     }
 }
 
@@ -2274,11 +2380,16 @@ impl PortfolioSource for UserDataConnector {
     /// # }
     /// ```
     async fn portfolio(&self) -> Result<Portfolio, Error> {
-        let positions = self.fetch_positions().await?;
-        let portfolio = self.fetch_portfolio().await?;
-        let now = brokapi_runtime::now();
-        let cash = map_portfolio::balances_from_positions(&positions, now);
-        Ok(map_portfolio::portfolio(&portfolio, cash, now))
+        let span = self.inner.span.clone();
+        async move {
+            let positions = self.fetch_positions().await?;
+            let portfolio = self.fetch_portfolio().await?;
+            let now = brokapi_runtime::now();
+            let cash = map_portfolio::balances_from_positions(&positions, now);
+            Ok(map_portfolio::portfolio(&portfolio, cash, now))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Quantity in units of the instrument, prices in the settlement currency.
@@ -2317,11 +2428,16 @@ impl PortfolioSource for UserDataConnector {
     /// # }
     /// ```
     async fn positions(&self) -> Result<Vec<Position>, Error> {
-        let p = self.fetch_portfolio().await?;
-        Ok(map_portfolio::positions_from_portfolio(
-            &p,
-            brokapi_runtime::now(),
-        ))
+        let span = self.inner.span.clone();
+        async move {
+            let p = self.fetch_portfolio().await?;
+            Ok(map_portfolio::positions_from_portfolio(
+                &p,
+                brokapi_runtime::now(),
+            ))
+        }
+        .instrument(span)
+        .await
     }
 
     /// Cash by currency from `GetPositions`: `available` money and the `blocked` part.
@@ -2360,11 +2476,16 @@ impl PortfolioSource for UserDataConnector {
     /// # }
     /// ```
     async fn balances(&self) -> Result<Vec<Balance>, Error> {
-        let p = self.fetch_positions().await?;
-        Ok(map_portfolio::balances_from_positions(
-            &p,
-            brokapi_runtime::now(),
-        ))
+        let span = self.inner.span.clone();
+        async move {
+            let p = self.fetch_positions().await?;
+            Ok(map_portfolio::balances_from_positions(
+                &p,
+                brokapi_runtime::now(),
+            ))
+        }
+        .instrument(span)
+        .await
     }
 
     /// `PortfolioStream` (positions with prices) and `PositionsStream` (cash and balances) under one id.
@@ -2419,7 +2540,16 @@ impl PortfolioSource for UserDataConnector {
     /// # }
     /// ```
     async fn subscribe_portfolio(&self, opts: SubscribeOpts) -> Result<SubscriptionId, Error> {
-        self.subscribe(UdSubKind::Portfolio, opts).await
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.subscribe(UdSubKind::Portfolio, opts).await
+        })
+        .await
     }
 }
 
@@ -2516,73 +2646,82 @@ impl StopOrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn place_stop(&self, req: PlaceStopOrderRequest) -> Result<OrderAck, Error> {
-        self.check_command()?;
-        let lot = self
-            .lot_of(&req.instrument)
-            .await
-            .map_err(|e| self.stop_used_up(req.cid, e))?;
-        let lots = pieces_to_lots(req.qty, lot)?;
-        let wire = map_stop::build_post(&self.account(), &req, lots)?;
-        self.inner
-            .price_grid
-            .check(&req.instrument.key, req.stop_price)?;
-        if let Some(p) = req.limit_price {
-            self.inner.price_grid.check(&req.instrument.key, p)?;
-        }
-        self.acquire("PostStopOrder")?;
-        let _instrument = self.inner.locks.lock(&req.instrument).await;
-        // The gate may have closed while this command stood in the queue.
-        self.check_command()?;
-        if !self
-            .inner
-            .stops
-            .lock()
-            .expect("stops poisoned")
-            .begin(req.cid)
-        {
-            return Err(Error::Rejected {
-                code: "duplicate_place".into(),
-                message: "auto-retry of place_stop is forbidden".into(),
-            });
-        }
-        let now = brokapi_runtime::now();
-        let sent = wall_nanos().as_nanos();
-        let mut c = self.inner.client.stop_orders();
-        let cid = req.cid;
-        match command(self.inner.request_timeout, c.post_stop_order(wire)).await {
-            CommandOutcome::Done(resp) if !resp.stop_order_id.is_empty() => {
-                self.inner
-                    .stops
-                    .lock()
-                    .expect("stops poisoned")
-                    .bind(cid, &resp.stop_order_id);
-                Ok(OrderAck {
-                    cid,
-                    broker_id: BrokerOrderId::new(resp.stop_order_id),
-                    ts: stamps(now, None),
-                })
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::PlaceStop,
+            Some(req.cid),
+            Some(&req.instrument.key),
+        );
+        brokapi_runtime::spans::command(span, async move {
+            self.check_command()?;
+            let lot = self
+                .lot_of(&req.instrument)
+                .await
+                .map_err(|e| self.stop_used_up(req.cid, e))?;
+            let lots = pieces_to_lots(req.qty, lot)?;
+            let wire = map_stop::build_post(&self.account(), &req, lots)?;
+            self.inner
+                .price_grid
+                .check(&req.instrument.key, req.stop_price)?;
+            if let Some(p) = req.limit_price {
+                self.inner.price_grid.check(&req.instrument.key, p)?;
             }
-            // No clear answer: the broker may hold the stop order (a lost answer, or an answer with no id).
-            // Keep what was asked for, so that the stop order can be linked to this cid when it shows up
-            // in the list.
-            CommandOutcome::Done(_) | CommandOutcome::Unknown => {
-                self.inner.stops.lock().expect("stops poisoned").lose(
-                    req,
-                    lots,
-                    sent,
-                    wall_nanos().as_nanos(),
-                );
-                Err(Error::Unknown)
+            self.acquire("PostStopOrder")?;
+            let _instrument = self.inner.locks.lock(&req.instrument).await;
+            // The gate may have closed while this command stood in the queue.
+            self.check_command()?;
+            if !self
+                .inner
+                .stops
+                .lock()
+                .expect("stops poisoned")
+                .begin(req.cid)
+            {
+                return Err(Error::Rejected {
+                    code: "duplicate_place".into(),
+                    message: "auto-retry of place_stop is forbidden".into(),
+                });
             }
-            CommandOutcome::Refused(_, err) => {
-                self.inner
-                    .stops
-                    .lock()
-                    .expect("stops poisoned")
-                    .forget_cid(cid);
-                Err(err)
+            let now = brokapi_runtime::now();
+            let sent = wall_nanos().as_nanos();
+            let mut c = self.inner.client.stop_orders();
+            let cid = req.cid;
+            match command(self.inner.request_timeout, c.post_stop_order(wire)).await {
+                CommandOutcome::Done(resp) if !resp.stop_order_id.is_empty() => {
+                    self.inner
+                        .stops
+                        .lock()
+                        .expect("stops poisoned")
+                        .bind(cid, &resp.stop_order_id);
+                    Ok(OrderAck {
+                        cid,
+                        broker_id: BrokerOrderId::new(resp.stop_order_id),
+                        ts: stamps(now, None),
+                    })
+                }
+                // No clear answer: the broker may hold the stop order (a lost answer, or an answer with no id).
+                // Keep what was asked for, so that the stop order can be linked to this cid when it shows up
+                // in the list.
+                CommandOutcome::Done(_) | CommandOutcome::Unknown => {
+                    self.inner.stops.lock().expect("stops poisoned").lose(
+                        req,
+                        lots,
+                        sent,
+                        wall_nanos().as_nanos(),
+                    );
+                    Err(Error::Unknown)
+                }
+                CommandOutcome::Refused(_, err) => {
+                    self.inner
+                        .stops
+                        .lock()
+                        .expect("stops poisoned")
+                        .forget_cid(cid);
+                    Err(err)
+                }
             }
-        }
+        })
+        .await
     }
 
     /// Cancels a stop order by its `cid` or by the broker's id (`CancelStopOrder`).
@@ -2632,6 +2771,16 @@ impl StopOrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn cancel_stop(&self, stop: StopOrderRef) -> Result<(), Error> {
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::CancelStop,
+            match &stop {
+                StopOrderRef::Cid(c) => Some(*c),
+                _ => None,
+            },
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
         self.check_command()?;
         let id = match stop {
             StopOrderRef::Broker(id) => id.as_str().to_string(),
@@ -2662,6 +2811,7 @@ impl StopOrderExecutor for UserDataConnector {
             CommandOutcome::Refused(_, err) => Err(err),
             CommandOutcome::Unknown => Err(Error::Unknown),
         }
+        }).await
     }
 
     /// The stop orders that are active now (`GetStopOrders` with the active filter).
@@ -2709,22 +2859,27 @@ impl StopOrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn active_stop_orders(&self) -> Result<Vec<StopOrderSnapshot>, Error> {
-        let raw = self.read_active_stops().await?;
-        let now = brokapi_runtime::now();
-        let mut lots = Vec::with_capacity(raw.len());
-        for o in &raw {
-            lots.push(
-                self.lot_of_parts(&o.instrument_uid, &o.figi, &o.ticker, &o.class_code)
-                    .await?,
-            );
+        let span = self.inner.span.clone();
+        async move {
+            let raw = self.read_active_stops().await?;
+            let now = brokapi_runtime::now();
+            let mut lots = Vec::with_capacity(raw.len());
+            for o in &raw {
+                lots.push(
+                    self.lot_of_parts(&o.instrument_uid, &o.figi, &o.ticker, &o.class_code)
+                        .await?,
+                );
+            }
+            let mut stops = self.inner.stops.lock().expect("stops poisoned");
+            stops.adopt(&raw, wall_nanos().as_nanos());
+            Ok(raw
+                .iter()
+                .zip(lots)
+                .map(|(o, lot)| map_stop::snapshot(o, stops.cid_of(&o.stop_order_id), now, lot))
+                .collect())
         }
-        let mut stops = self.inner.stops.lock().expect("stops poisoned");
-        stops.adopt(&raw, wall_nanos().as_nanos());
-        Ok(raw
-            .iter()
-            .zip(lots)
-            .map(|(o, lot)| map_stop::snapshot(o, stops.cid_of(&o.stop_order_id), now, lot))
-            .collect())
+        .instrument(span)
+        .await
     }
 
     /// T-Bank has no stream of stop order statuses (`StopOrdersService` is unary only).
@@ -2761,9 +2916,18 @@ impl StopOrderExecutor for UserDataConnector {
     /// # }
     /// ```
     async fn subscribe_stop_orders(&self) -> Result<SubscriptionId, Error> {
-        Err(Error::Unsupported {
-            capability: "stop_order_stream".into(),
+        let span = brokapi_runtime::spans::op(
+            &self.inner.span,
+            brokapi_runtime::spans::Op::Subscribe,
+            None,
+            None,
+        );
+        brokapi_runtime::spans::command(span, async move {
+            Err(Error::Unsupported {
+                capability: "stop_order_stream".into(),
+            })
         })
+        .await
     }
 }
 

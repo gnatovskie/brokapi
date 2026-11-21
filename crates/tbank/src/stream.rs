@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::{Status, Streaming};
-use tracing::{debug, warn};
+use tracing::{error, info, warn};
 
 use crate::error::map_status;
 
@@ -161,7 +161,7 @@ pub async fn supervise<M, F, Fut, Frame>(
         let reason = match opened {
             Ok(mut stream) => {
                 last_error.clear();
-                debug!(stream = name, "stream open");
+                info!(stream = name, "stream open");
                 if tx.send(connected()).await.is_err() {
                     return;
                 }
@@ -189,7 +189,7 @@ pub async fn supervise<M, F, Fut, Frame>(
             }
             Err(status) => {
                 if let Some(reason) = fatal_open(&status) {
-                    warn!(stream = name, %reason, "stream refused for good, not reopened");
+                    error!(stream = name, %reason, "stream refused for good, not reopened");
                     last_error.set(format!("{name}: {reason}"));
                     let _ = tx.send(failed(reason)).await;
                     return;

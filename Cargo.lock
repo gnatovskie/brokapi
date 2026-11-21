@@ -397,7 +397,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -654,6 +653,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tracing",
 ]
 
 [[package]]

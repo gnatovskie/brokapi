@@ -33,7 +33,7 @@ use tokio::time::timeout;
 
 /// The price of the test order is this share of the best bid. Far enough that it does not fill in a normal
 /// session, near enough that the exchange does not refuse it as being outside the allowed corridor.
-const FAR_FROM_MARKET: Decimal = Decimal::from_parts(9, 0, 0, false, 1);
+const FAR_FROM_MARKET: Decimal = Decimal::from_parts(95, 0, 0, false, 2);
 
 /// The name of a state, for a short line of output.
 fn state_name(state: &OrderState) -> &'static str {

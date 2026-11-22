@@ -22,7 +22,7 @@ async def first_day(connect: Callable[[], Awaitable[brokapi.Client]]) -> bool:
     sber = await first.instrument("SBER", "MISX")
     params = await first.trading_params(sber)
     book = await first.order_book(sber, depth=1)
-    price = brokapi.round_to_step(book.bids[0].price * Decimal("0.9"), params.price_step, brokapi.RoundMode.DOWN)
+    price = brokapi.round_to_step(book.bids[0].price * Decimal("0.95"), params.price_step, brokapi.RoundMode.DOWN)
 
     await first.reconcile([])
     cid = brokapi.new_cid()  # in a real bot it is in the journal before the next line

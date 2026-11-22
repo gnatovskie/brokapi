@@ -19,7 +19,7 @@ import brokapi
 
 # The price of the test order is this share of the best bid. Far enough that it does not fill in a normal session,
 # near enough that the exchange does not refuse it as being outside the allowed corridor.
-FAR_FROM_MARKET = Decimal("0.9")
+FAR_FROM_MARKET = Decimal("0.95")
 
 
 async def wait_for_order(client: brokapi.Client, cid, kind: brokapi.OrderStateKind) -> None:

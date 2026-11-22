@@ -14,7 +14,7 @@
 
 Источник: официальные .proto в `crates/tbank-protocol/proto`.
 
-Всего 101: в интерфейсе 30, через `raw()` 71.
+Всего 101: в интерфейсе 32, через `raw()` 69.
 
 | Сервис | Метод | Поток | Где |
 |---|---|---|---|
@@ -88,7 +88,7 @@
 | OrdersService | ReplaceOrder |  | в интерфейсе |
 | OrdersService | GetMaxLots |  | через raw() |
 | OrdersService | GetOrderPrice |  | через raw() |
-| SandboxService | OpenSandboxAccount |  | через raw() |
+| SandboxService | OpenSandboxAccount |  | в интерфейсе |
 | SandboxService | GetSandboxAccounts |  | через raw() |
 | SandboxService | CloseSandboxAccount |  | через raw() |
 | SandboxService | PostSandboxOrder |  | через raw() |
@@ -102,7 +102,7 @@
 | SandboxService | GetSandboxOperations |  | через raw() |
 | SandboxService | GetSandboxOperationsByCursor |  | через raw() |
 | SandboxService | GetSandboxPortfolio |  | через raw() |
-| SandboxService | SandboxPayIn |  | через raw() |
+| SandboxService | SandboxPayIn |  | в интерфейсе |
 | SandboxService | GetSandboxWithdrawLimits |  | через raw() |
 | SandboxService | GetSandboxMaxLots |  | через raw() |
 | SandboxService | PostSandboxStopOrder |  | через raw() |

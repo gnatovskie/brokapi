@@ -1,0 +1,29 @@
+# Phrases a public page must not say: promises without a condition and marketing words.
+# One phrase per line, lower case, "ё" written as "е". A line that starts with # is a comment.
+# Checked by tests/docs_claims.rs (the book, the READMEs, docs/llms.py) and by the site check of the home page.
+# A phrase here was removed from the pages on purpose: say what the code does and under which condition instead.
+ни при каких условиях
+никогда не поставит
+никогда не поставил
+гарантируем
+гарантированно
+с любым брокером
+с любым из них
+работает с любым
+без изменений с любым
+движок для торгов
+торговый движок для
+бот их не обойдет
+не обойдет потолк
+не ослабит
+полностью проверен
+полностью безопас
+абсолютно надеж
+абсолютно безопас
+самый надежн
+самая надежн
+лучшая библиотека
+лучшее решение
+уникальн
+без единой ошибки
+у отмены своя квота

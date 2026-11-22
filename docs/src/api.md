@@ -19,7 +19,7 @@
 | `brokapi-client` | один счет у любого брокера за одним типом, на нем стоят Python и гейтвей | [brokapi_client](api/brokapi_client/index.html) |
 | `brokapi-gateway` | сервер и клиент гейтвея, программа `brokapi` | [brokapi_gateway](api/brokapi_gateway/index.html) |
 | `brokapi-sansio` | ядро коннектора без сети, стенд для записанных кадров | [brokapi_sansio](api/brokapi_sansio/index.html) |
-| `brokapi-redact` | что не попадает в лог: маска номера счета, чистка запросов и ответов брокера, с версии 0.1.0-alpha.11 | [brokapi_redact](api/brokapi_redact/index.html) |
+| `brokapi-redact` | что не попадает в лог: маска номера счета, чистка запросов и ответов брокера, с версии 0.1.0-beta.1 | [brokapi_redact](api/brokapi_redact/index.html) |
 | `brokapi-bcs` | коннекторы БКС | [brokapi_bcs](api/brokapi_bcs/index.html) |
 | `brokapi-tbank` | коннекторы Т-Банка | [brokapi_tbank](api/brokapi_tbank/index.html) |
 | `brokapi-finam` | коннекторы Финама | [brokapi_finam](api/brokapi_finam/index.html) |

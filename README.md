@@ -3,7 +3,7 @@
 Библиотека на Rust, пакет для Python и программа `brokapi` (Gateway): один интерфейс к API брокеров РФ и криптобирж. Сейчас подключены БКС, Т-Банк, Финам, АЛОР и Bybit (USDT-фьючерсы, категория `linear`).
 Рыночные данные, заявки, сверка со счетом, лимиты запросов. Сеть и деньги в тестах не используются: все примеры идут против имитаций брокеров.
 
-**Открытая альфа.** Интерфейс до беты может меняться. Перед боевым счетом: [документация](https://brokapi.ru/docs/before-live.html).
+**Открытая бета.** Интерфейс до версии 1.0 может меняться. Перед боевым счетом: [документация](https://brokapi.ru/docs/before-live.html).
 
 Документация: <https://brokapi.ru/docs/>. Справочник API собирается из кода (rustdoc) и лежит рядом с книгой.
 Для ИИ-агентов: [llms.txt](https://brokapi.ru/docs/llms.txt) и [llms-full.txt](https://brokapi.ru/docs/llms-full.txt), страницы книги в markdown рядом с HTML.
@@ -38,7 +38,7 @@ pip install brokapi
 |---|---|
 | `brokapi` | главный крейт, реэкспортирует остальные |
 | `brokapi-core`, `brokapi-runtime`, `brokapi-sansio` | типы и трейты, лимиты и сверка, ядро без сети |
-| `brokapi-redact` | что не попадает в лог: маска номера счета, чистка запросов и ответов брокера, с версии 0.1.0-alpha.11 |
+| `brokapi-redact` | что не попадает в лог: маска номера счета, чистка запросов и ответов брокера, с версии 0.1.0-beta.1 |
 | `brokapi-bcs`, `brokapi-tbank`, `brokapi-finam`, `brokapi-alor`, `brokapi-bybit` | коннекторы |
 | `brokapi-bcs-protocol`, `brokapi-tbank-protocol`, `brokapi-finam-protocol`, `brokapi-alor-protocol`, `brokapi-bybit-protocol` | клиенты протоколов |
 | `brokapi-client` | один счет у любого из пяти брокеров за одним типом: события, лимиты, вызовы по имени (на нем стоит Python) |

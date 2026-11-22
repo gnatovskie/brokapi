@@ -4,7 +4,7 @@ One interface to the APIs of Russian brokers and crypto exchanges: market data, 
 A thin layer over the Rust core of [brokapi](https://brokapi.ru/): `asyncio` for the events, `decimal.Decimal` for money,
 the same errors and the same rules as the core.
 
-**Open alpha.** The interface can change before the beta. Read "Before you trade with real money" first (in Russian):
+**Open beta.** The interface can change before 1.0. Read "Before you trade with real money" first (in Russian):
 <https://brokapi.ru/docs/before-live.html>.
 
 ```python

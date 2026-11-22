@@ -3,7 +3,7 @@
 Как получить библиотеку и убедиться, что она встала. Это первый шаг обоих быстрых стартов: [Rust](rust/quickstart.md),
 [Python](python/quickstart.md).
 
-> Открытая альфа: интерфейс до беты может меняться. Перед первой заявкой на счете прочитайте [Перед боевым счетом](before-live.md).
+> Открытая бета: интерфейс до версии 1.0 может меняться. Перед первой заявкой на счете прочитайте [Перед боевым счетом](before-live.md).
 > Код открыт: `https://github.com/gnatovskie/brokapi`. Ниже в каждом разделе команда для пакета и для самой свежей версии из репозитория.
 
 ## Что понадобится
@@ -85,7 +85,7 @@ python -c "import brokapi; print(brokapi.__version__)"
 | `error: package ... requires rustc 1.88` | Версия Rust старее нужной | `rustup update` |
 | `pip` пишет, что не нашел `cargo` или `rustc`, при установке из репозитория | Расширение Python собирается из исходников, нужен Rust | Поставить Rust через [rustup](https://rustup.rs) и повторить |
 | `ModuleNotFoundError: No module named 'brokapi'` | Пакет поставлен в другое окружение | Активировать то окружение, в которое ставили (`. .venv/bin/activate`), и проверить `python -m pip show brokapi` |
-| `could not find brokapi-gateway in registry` у `cargo install brokapi-gateway` | Не указана версия: у альфы нет стабильного выпуска | Добавить `--version`, как в разделе «Через cargo» |
+| `could not find brokapi-gateway in registry` у `cargo install brokapi-gateway` | Не указана версия: у беты нет стабильного выпуска | Добавить `--version`, как в разделе «Через cargo» |
 | `the crate brokapi could not be found in registry index` у `cargo add brokapi` | Устарел индекс crates.io на машине или старый `cargo` | `rustup update` и повторить. Или ставить из репозитория (команда выше) |
 
 ## Программа brokapi (Gateway)
@@ -142,7 +142,7 @@ Expand-Archive $F -DestinationPath .
 
 ### Через cargo
 
-Нужен Rust 1.88 или новее. Версия предварительная (альфа), поэтому номер указывается явно: без `--version` `cargo install` ищет только стабильные выпуски
+Нужен Rust 1.88 или новее. Версия предварительная (бета), поэтому номер указывается явно: без `--version` `cargo install` ищет только стабильные выпуски
 и ответит, что крейта нет.
 
 ```bash

@@ -21,7 +21,7 @@
 //! | `logging` | `logging::init`: the log to stderr, the level from `BROKAPI_LOG` | `logging` |
 //!
 //! The guide and the rules for orders are in the book:
-//! <https://brokapi.ru/docs/>. The stage is open alpha: the interface can change before the beta. Before you trade with real
+//! <https://brokapi.ru/docs/>. The stage is open beta: the interface can change before 1.0. Before you trade with real
 //! money, read <https://brokapi.ru/docs/before-live.html>.
 //!
 //! # Example

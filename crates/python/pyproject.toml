@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 license = { text = "MIT OR Apache-2.0" }
 keywords = ["trading", "broker", "algotrading", "finance", "api", "asyncio", "moex", "russia", "t-bank", "tinkoff", "finam", "alor", "bcs"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "Intended Audience :: Financial and Insurance Industry",

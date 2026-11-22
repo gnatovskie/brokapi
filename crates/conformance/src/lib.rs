@@ -3,8 +3,9 @@
 //! This is the test layer of the connector library. Each adapter (`brokapi-bcs`, `brokapi-tbank`,
 //! `brokapi-finam`, ...) implements the capability traits of [`brokapi_core`], and each runs the same
 //! scenarios from this crate against its own in-process broker imitation (see `brokapi-mocks`).
-//! So all brokers behave the same through the traits: the same refusal is the same
-//! [`brokapi_core::Error`], the same stream gives the same envelope. The scenarios use only the
+//! So supported connectors agree on the shared contract verified by these scenarios, within their
+//! `caps()` and documented broker quirks: shared refusals map to [`brokapi_core::Error`] and streams
+//! emit the same envelope. The scenarios use only the
 //! traits, never an adapter's own types.
 //!
 //! A scenario is an `async fn` that takes the connector (and sometimes the event receiver). It

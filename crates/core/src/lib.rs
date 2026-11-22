@@ -1,8 +1,9 @@
 //! The public surface of brokapi: domain types, capability traits, events and errors.
 //!
 //! This is the core crate of the workspace. It has no network code and does not depend on any
-//! broker. A broker connector (`brokapi-bcs`, `brokapi-tbank`, `brokapi-finam`) implements the traits
-//! of this crate, and your program is written against them, so the same code runs on every broker.
+//! broker. Each connector (`brokapi-bcs`, `brokapi-tbank`, `brokapi-finam`, `brokapi-alor`,
+//! `brokapi-bybit`) implements the traits of this crate, so code written against them transfers across
+//! supported connectors within their `caps()` and broker-specific instrument IDs.
 //! Documentation of the whole library, with guides: <https://brokapi.ru/docs/>.
 //!
 //! # What is here

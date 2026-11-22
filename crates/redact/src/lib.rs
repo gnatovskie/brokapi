@@ -8,7 +8,8 @@
 //! | Cut the known secrets of a run out of a text | [`remove_secrets`] |
 //!
 //! The connectors use it for their logs, the recorder of live runs in `brokapi-mocks` for the reference
-//! files. One set of rules for both: what is clean enough for a public file is clean enough for a log.
+//! files. One best-effort set of rules for both: because scrubbing matches known field names and secret
+//! patterns, always review `trace` logs or recorded fixtures before sharing them.
 //!
 //! The book is at <https://brokapi.ru/docs/>.
 //!

@@ -1,6 +1,6 @@
 [package]
 name = "brokapi-redact"
-description = "What must not reach a log or a file: the account mask and the cleaning of broker answers, shared by all brokapi crates"
+description = "Best-effort account masking and JSON body scrubbing for logs and recorded fixtures, shared by all brokapi crates"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

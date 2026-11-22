@@ -2,7 +2,8 @@
 //!
 //! This crate is the connector layer for T-Bank. It sits on the protocol layer `brokapi-tbank-protocol`
 //! (generated gRPC client, endpoints, token) and implements the capability traits of `brokapi-core`,
-//! so code written against those traits also works with the other brokers. Timing, rate limits and
+//! so code written against those traits transfers across other connectors within their `caps()` and
+//! broker-specific instrument IDs. Timing, rate limits and
 //! stream supervision come from `brokapi-runtime` and `brokapi-sansio`.
 //!
 //! - [`MarketDataConnector`] - order book, trades, quotes, candles, instrument directory. Not tied to

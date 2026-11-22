@@ -19,7 +19,7 @@
 | `brokapi.numbers` | точное округление до шага цены (`round_to_step`) | [brokapi.numbers](api/python/brokapi/numbers.html) |
 | `brokapi.testing` | имитации брокеров для тестов | [brokapi.testing](api/python/brokapi/testing.html) |
 
-Примеры в docstring, помеченные `>>>`, запускаются тестом (`pytest --doctest-modules`), так что справочник не может тихо устареть.
+Примеры в docstring с пометкой `>>>` запускаются тестом (`pytest --doctest-modules`) против локального кода и имитаций.
 
 Справочник Rust: [Справочник API: Rust](api.md). Имена ошибок, событий и возможностей у Python те же, что у ядра, поэтому
 [Ошибки и что с ними делать](errors.md) и [События и возможности](events.md) верны для обоих.

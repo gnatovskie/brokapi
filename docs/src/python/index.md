@@ -49,7 +49,7 @@ python -c "import brokapi; print(brokapi.__version__)"
 | Свои заявки и исполнения | `subscribe_order_state`, `subscribe_executions`, `executions` |
 | Заявки | `reconcile`, `place`, `cancel`, `replace` (где брокер умеет), `order_state`, `active_orders` |
 | Стоп-заявки | `place_stop`, `cancel_stop`, `active_stop_orders`, `subscribe_stop_orders` (потока статусов нет ни у кого: `Unsupported`) |
-| Любой метод API брокера | `await client.raw("GetLastPrices", {...})`: имя метода и словарь, ответ словарем, квота общая с клиентом |
+| Любой метод запрос-ответ API брокера | `await client.raw("GetLastPrices", {...})`: имя метода и словарь, ответ словарем, квота общая с клиентом (потоки и WebSocket не отдаются) |
 | Запись и проигрыш событий | `brokapi.record`: `EnvelopeWriter`, `EnvelopeReader`, `replay`. Файл тот же, что у Rust |
 | Справочник, лот, шаг цены, статус торгов, расписание | `instrument`, `find`, `trading_params`, `trading_status`, `schedule` |
 | Портфель | `portfolio`, `positions`, `balances`, подписка `subscribe_portfolio` |

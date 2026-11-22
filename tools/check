@@ -60,7 +60,7 @@ step "4/10 cargo test --doc --workspace"
 cargo test --doc --workspace
 
 step "5/10 cargo doc --no-deps --workspace (warnings are errors, no font preload left)"
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --features brokapi/bcs,brokapi/tbank,brokapi/finam,brokapi/alor,brokapi/bybit
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --features brokapi/bcs,brokapi/tbank,brokapi/finam,brokapi/alor,brokapi/bybit,brokapi/logging
 python3 docs/rustdoc_nofonts.py --selftest
 python3 docs/rustdoc_nofonts.py "${CARGO_TARGET_DIR:-target}/doc"
 

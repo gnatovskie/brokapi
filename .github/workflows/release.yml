@@ -1,12 +1,20 @@
-# The program `brokapi` (crates/gateway) as ready-made files for Linux, macOS and Windows, and the GitHub release that holds them.
-# Started by a tag `v*` (it builds, tests and creates the release) or by hand (Actions -> release -> Run workflow: it builds
-# and tests the same files and keeps them as artifacts of the run, and creates NO release).
+# A release of brokapi: the program `brokapi` (crates/gateway) as ready-made files for Linux, macOS and Windows, the crates on
+# crates.io, the Python package on PyPI, the GitHub release and the tag of the Go module.
+#
+# A tag `v*` releases: it builds and tests everything, then publishes in this order: crates.io, PyPI, the GitHub release with
+# the files, the tag `go/v*`. Every step publishes only what is not there yet, so a run that stopped half way (network, a
+# limit of crates.io) is finished with "Re-run failed jobs".
+#
+# By hand without `tag` (Actions -> release -> Run workflow, `gh workflow run release.yml --ref <branch>`): the check before a
+# release. It builds and tests the same files and wheels, makes a dry run of crates.io and keeps the files as artifacts of
+# the run. It publishes nothing.
 #
 # By hand with `tag` (`gh workflow run release.yml --ref main -f tag=v1.2.0`): the code of that tag is built with this file
-# and its release is created. For a tag whose own run failed in the workflow, not in the code: the tag stays where it is,
-# and the files are built from it.
+# and released. For a tag whose own run failed in the workflow, not in the code: the tag stays where it is.
 #
-# It does NOT publish to crates.io or PyPI. That is a separate decision, made by hand, version by version (`tools/release`).
+# Publishing uses trusted publishing of crates.io and PyPI: a short-lived token for this workflow and the environment
+# `release`, no stored keys. The environment lets only tags `v*` and `main` in. A crate that is not on crates.io yet is
+# published once by hand by an owner (tools/release), trusted publishing works only for an existing crate.
 #
 # Why these targets:
 # - Linux is built for musl, so the file is static: no glibc version to match, it runs on Debian, Ubuntu, RHEL, Alpine and in
@@ -161,12 +169,85 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Only for a tag (pushed, or given by hand). The files of all five builds, one list of sums, one GitHub release. A run
-  # started by hand without a tag ends above.
+  # The wheels and the sdist of the Python package, each wheel tested on its own system (python.yml).
+  python:
+    name: python
+    needs: version
+    uses: ./.github/workflows/python.yml
+    with:
+      ref: ${{ inputs.tag || github.ref }}
+
+  # The crates: a dry run without a tag, publishing with one. `tools/release` checks the packages first and leaves out what is
+  # already on crates.io.
+  crates:
+    name: crates.io
+    needs: [version, build, python]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: ${{ (github.ref_type == 'tag' || inputs.tag != '') && 'release' || 'check' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dry run
+        if: github.ref_type != 'tag' && inputs.tag == ''
+        run: tools/release dry-run
+      - name: Token of trusted publishing
+        if: github.ref_type == 'tag' || inputs.tag != ''
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish
+        if: github.ref_type == 'tag' || inputs.tag != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: tools/release publish --yes
+
+  pypi:
+    name: PyPI
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    needs: [version, python, crates]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      id-token: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: wheel-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@v7
+        with:
+          name: sdist
+          path: dist
+      - name: Check the files
+        working-directory: dist
+        run: |
+          ls -l
+          # 0.1.0-beta.1 in Cargo.toml is 0.1.0b1 in Python.
+          py=$(echo "${VERSION}" | sed -E 's/-alpha\./a/; s/-beta\./b/; s/-rc\./rc/')
+          test "$(ls brokapi-"${py}"-*.whl | wc -l)" = "5"
+          test -f "brokapi-${py}.tar.gz"
+          test "$(ls | wc -l)" = "6"
+          # The extension compiles the .proto files of the gateway: without them `pip install` from the sdist fails.
+          tar -tzf "brokapi-${py}.tar.gz" | grep -q "/crates/gateway/proto/brokapi/gateway/v1/gateway.proto"
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
+
+  # The files of all five builds, one list of sums, one GitHub release. Only for a tag (pushed, or given by hand).
   release:
     name: release
     if: github.ref_type == 'tag' || inputs.tag != ''
-    needs: [version, build]
+    needs: [version, build, crates, pypi]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -203,6 +284,44 @@ jobs:
         run: |
           flags=""
           case "${VERSION}" in *-*) flags="--prerelease" ;; esac
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            echo "the release ${TAG} is already there"
+            exit 0
+          fi
           gh release create "${TAG}" dist/* \
             --repo "${GITHUB_REPOSITORY}" --verify-tag \
             --title "brokapi ${VERSION}" --notes-file notes.md ${flags}
+
+  # The Go module lives in go/ of this repository, so its tag has the prefix of the directory: go/v<version>, on the same
+  # commit. Then the module proxy is asked for it, so that `go get` finds it at once.
+  go:
+    name: go tag
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    needs: [version, release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      TAG: go/${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Tag
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null; then
+            echo "${TAG} is already there"
+          else
+            git tag "${TAG}" HEAD
+            git push origin "refs/tags/${TAG}"
+          fi
+      - name: Ask the module proxy
+        run: |
+          v="${TAG#go/}"
+          for i in $(seq 1 20); do
+            if curl -fsS "https://proxy.golang.org/github.com/runinfra/brokapi/go/@v/${v}.info"; then echo; exit 0; fi
+            sleep 30
+          done
+          echo "::error::proxy.golang.org does not know github.com/runinfra/brokapi/go@${v}"
+          exit 1

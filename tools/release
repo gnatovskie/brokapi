@@ -2,20 +2,24 @@
 # Checks before a release and publishing the crates to crates.io, in the right order.
 #
 #   tools/release order               the crates in the order they must be published (a crate after the crates it uses)
+#   tools/release pending             the crates whose version is not on crates.io yet (asks crates.io)
 #   tools/release check              what is in each package and that nothing is missing, offline and fast
 #   tools/release dry-run [--no-verify]
 #                                     `check`, then `cargo publish --workspace --dry-run`: every package is built from its own
 #                                     unpacked files, as a user of crates.io gets it. Without --no-verify it compiles the
 #                                     whole workspace (long, several GB of disk: set CARGO_TARGET_DIR to a place with room)
 #   tools/release publish             `check`, the dry run, then publishes for real. Asks to type the version first (--yes skips the
-#                                     question)
+#                                     question). Crates whose version is already on crates.io are left out
 #
 # Publishing cannot be undone: a version of a crate stays on crates.io for good. The Python package (PyPI) and the files of
 # the program `brokapi` (GitHub release, started by the tag `v<version>`, see .github/workflows/release.yml) are separate steps.
 #
-# `cargo publish --workspace` takes the crates in the order of their dependencies, publishes one, waits until the index shows
-# it, then the next. If it stops half way (network, the limit of crates.io), run the same command again: it skips what is
-# already there.
+# `cargo publish` takes the crates in the order of their dependencies, publishes one, waits until the index shows it, then
+# the next. If it stops half way (network, the limit of crates.io), run the same command again: crates whose version is
+# already on crates.io are left out before cargo starts. A new crate is published once by hand by an owner of the crates
+# (trusted publishing of crates.io works only for a crate that exists), the release workflow publishes the rest.
+#
+# In the release workflow (.github/workflows/release.yml) the token is a short-lived one from trusted publishing of crates.io.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -41,6 +45,21 @@ while rest:
 for n in done:
     print(n, pkgs[n]["manifest_path"].rsplit("/", 1)[0])
 '
+}
+
+# Crates of `order` whose version is not on crates.io yet, as `-p name` arguments for cargo.
+pending() {
+  local v name dir code
+  v="$(version)"
+  while read -r name dir; do
+    code=$(curl -s -o /dev/null -w '%{http_code}' -A 'brokapi-release (https://github.com/gnatovskie/brokapi)' \
+      "https://crates.io/api/v1/crates/${name}/${v}")
+    case "$code" in
+      200) echo "  $name $v is already on crates.io" >&2 ;;
+      404) printf -- '-p %s ' "$name" ;;
+      *) echo "crates.io answered $code for $name $v" >&2; return 1 ;;
+    esac
+  done < <(order)
 }
 
 check() {
@@ -78,6 +97,10 @@ case "$cmd" in
   order)
     order | awk '{ printf "%2d. %s\n", NR, $1 }'
     ;;
+  pending)
+    todo="$(pending)"
+    echo "${todo:-nothing: every crate of $(version) is on crates.io}"
+    ;;
   check)
     check
     ;;
@@ -95,8 +118,15 @@ case "$cmd" in
     # The dry run first, always: it builds every package from its own files, and a package that does not build (a file
     # outside the crate, a dependency without a version) stops here, before anything is uploaded. 28.10.2026 alpha.9
     # went to `publish` without it and stopped on brokapi-mocks only at the verification of the real run.
-    cargo publish --workspace --locked --dry-run
-    cargo publish --workspace --locked
+    todo="$(pending)"
+    if [ -z "$todo" ]; then
+      echo "every crate of $(version) is already on crates.io"
+      exit 0
+    fi
+    # shellcheck disable=SC2086 # one argument per word: -p name -p name
+    cargo publish --locked --dry-run $todo
+    # shellcheck disable=SC2086
+    cargo publish --locked $todo
     echo "published $(version)"
     ;;
   *)

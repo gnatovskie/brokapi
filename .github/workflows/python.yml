@@ -1,6 +1,6 @@
 # Wheels of the Python package (crates/python) for Linux, macOS and Windows, and a smoke test of each on its own system.
-# Started by hand (Actions -> python -> Run workflow) or by a tag `python-v*`. It builds and tests. It does NOT publish:
-# wheels are uploaded as artifacts of the run, putting them on PyPI is a separate decision and a separate step.
+# Started by hand (Actions -> python -> Run workflow), by a tag `python-v*`, or by release.yml for a release. It builds and
+# tests. It does NOT publish: wheels and the sdist are artifacts of the run, release.yml puts them on PyPI.
 #
 # Made from `maturin generate-ci github` (maturin 1.15) and cut down: one abi3 wheel covers every Python from 3.10, so no
 # free-threaded and no per-version wheels, and no 32-bit or exotic targets. Linux aarch64 is built on an ARM runner, not by
@@ -10,6 +10,13 @@ name: python
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "The commit or tag to build (empty: the ref of the run)"
+        type: string
+        required: false
+        default: ""
   push:
     tags:
       - "python-v*"
@@ -34,6 +41,8 @@ jobs:
           - { os: windows, runner: windows-latest, target: x64 }
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.10"
@@ -71,6 +80,8 @@ jobs:
           - { os: windows, runner: windows-latest, target: x64, python: "3.12" }
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
@@ -104,6 +115,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - name: Build the sdist
         uses: PyO3/maturin-action@v1
         with:
